@@ -4,6 +4,7 @@ using AIChatAssistant.Models.Chat;
 using AIChatAssistant.Models.Ollama;
 using AIChatAssistant.Models.Validators;
 using System;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 
@@ -23,7 +24,22 @@ namespace AIChatAssistant.Services.AI.Validators
             string answer,
             IReadOnlyList<SearchResult> searchResults)
         {
-            if (IsDirectlySupported(answer, searchResults))
+
+            var directCheckStart = Stopwatch.GetTimestamp();
+
+            var directlySupported =
+                IsDirectlySupported(
+                    answer,
+                    searchResults);
+
+            var directCheckElapsed =
+                Stopwatch.GetElapsedTime(directCheckStart);
+
+            Console.WriteLine(
+                $"Grounding deterministic check: " +
+                $"{directCheckElapsed.TotalMilliseconds:F0} ms");
+
+            if (directlySupported)
             {
                 Console.WriteLine(
                     "Grounding validation skipped: " +
@@ -234,8 +250,8 @@ Do not return markdown, explanations outside the JSON, or additional fields.
             };
         }
         private static bool IsDirectlySupported(
-    string answer,
-    IReadOnlyList<SearchResult> searchResults)
+     string answer,
+     IReadOnlyList<SearchResult> searchResults)
         {
             if (string.IsNullOrWhiteSpace(answer) ||
                 searchResults.Count == 0)
@@ -244,7 +260,7 @@ Do not return markdown, explanations outside the JSON, or additional fields.
             }
 
             var normalizedAnswer =
-                NormalizeText(answer);
+                NormalizeClaim(answer);
 
             if (string.IsNullOrWhiteSpace(normalizedAnswer))
             {
@@ -261,17 +277,157 @@ Do not return markdown, explanations outside the JSON, or additional fields.
                 }
 
                 var normalizedContent =
-                    NormalizeText(content);
+                    NormalizeClaim(content);
 
+                // Exact normalized match.
                 if (normalizedContent.Contains(
                     normalizedAnswer,
                     StringComparison.OrdinalIgnoreCase))
                 {
                     return true;
                 }
+
+                // Compare the answer against individual KB sentences.
+                var sentences =
+                    content
+                        .Split(
+                            ['.', '!', '?'],
+                            StringSplitOptions.RemoveEmptyEntries);
+
+                foreach (var sentence in sentences)
+                {
+                    var normalizedSentence =
+                        NormalizeClaim(sentence);
+
+                    if (string.IsNullOrWhiteSpace(normalizedSentence))
+                    {
+                        continue;
+                    }
+
+                    if (ClaimsHaveSameMeaningStructure(
+                        normalizedAnswer,
+                        normalizedSentence))
+                    {
+                        return true;
+                    }
+                }
             }
 
             return false;
+        }
+
+        private static bool ClaimsHaveSameMeaningStructure(
+            string answer,
+            string source)
+        {
+            var answerTokens =
+                GetClaimTokens(answer);
+
+            var sourceTokens =
+                GetClaimTokens(source);
+
+            if (answerTokens.Count == 0 ||
+                sourceTokens.Count == 0)
+            {
+                return false;
+            }
+
+            var commonTokens =
+                answerTokens
+                    .Intersect(
+                        sourceTokens,
+                        StringComparer.OrdinalIgnoreCase)
+                    .Count();
+
+            var smallerCount =
+                Math.Min(
+                    answerTokens.Count,
+                    sourceTokens.Count);
+
+            if (smallerCount == 0)
+            {
+                return false;
+            }
+
+            var overlap =
+                (float)commonTokens / smallerCount;
+
+            // Require strong overlap and reasonably similar claim size.
+            var sizeDifference =
+                Math.Abs(
+                    answerTokens.Count -
+                    sourceTokens.Count);
+
+            return overlap >= 0.90f &&
+                   sizeDifference <= 2;
+        }
+
+        private static string NormalizeClaim(string text)
+        {
+            return string.Join(
+                " ",
+                text
+                    .ToLowerInvariant()
+                    .Split(
+                        (char[]?)null,
+                        StringSplitOptions.RemoveEmptyEntries)
+                    .Select(token =>
+                        token.Trim(
+                            '.', ',', '!', '?', ':', ';',
+                            '"', '\'', '(', ')', '[', ']'))
+                    .Where(token =>
+                        !string.IsNullOrWhiteSpace(token)));
+        }
+
+        private static List<string> GetClaimTokens(string text)
+        {
+            var ignoredWords =
+                new HashSet<string>(
+                    StringComparer.OrdinalIgnoreCase)
+                {
+            "is",
+            "are",
+            "was",
+            "were",
+            "be",
+            "being",
+            "been",
+            "stands",
+            "for",
+            "the",
+            "a",
+            "an"
+                };
+
+            return text
+                .Split(
+                    (char[]?)null,
+                    StringSplitOptions.RemoveEmptyEntries)
+                .Select(token =>
+                    token.Trim(
+                        '.', ',', '!', '?', ':', ';',
+                        '"', '\'', '(', ')', '[', ']'))
+                .Where(token =>
+                    token.Length >= 2 &&
+                    !ignoredWords.Contains(token))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        private static List<string> GetMeaningfulTokens(string text)
+        {
+            return text
+                .Split(
+                    (char[]?)null,
+                    StringSplitOptions.RemoveEmptyEntries)
+                .Select(token =>
+                    token.Trim(
+                        '.', ',', '!', '?', ':', ';',
+                        '"', '\'', '(', ')', '[', ']'))
+                .Where(token =>
+                    token.Length >= 2)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
         }
 
         private static string NormalizeText(string text)
