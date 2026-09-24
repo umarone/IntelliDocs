@@ -43,6 +43,18 @@ builder.Services.Configure<AdaptiveRetrievalOptions>(
     builder.Configuration.GetSection("AdaptiveRetrieval"));
 builder.Services.Configure<MemoryOptions>(
     builder.Configuration.GetSection("MemoryOptions"));
+//builder.Services.Configure<QdrantOptions>(
+//    builder.Configuration.GetSection("Qdrant"));
+
+var qdrantOptions =
+    builder.Configuration
+        .GetSection("Qdrant")
+        .Get<QdrantOptions>()
+    ?? throw new InvalidOperationException(
+        "Qdrant configuration is missing.");
+
+qdrantOptions.Validate();
+
 builder.Services.Configure<QdrantOptions>(
     builder.Configuration.GetSection("Qdrant"));
 
@@ -74,7 +86,7 @@ builder.Services.AddScoped<IChunkingService, CharacterChunkingService>();
 builder.Services.AddHttpClient<IEmbeddingProvider, OllamaEmbeddingProvider>();
 
 //builder.Services.AddSingleton<IVectorStore, InMemoryVectorStore>();
-builder.Services.AddScoped<IVectorStore, SqlServerVectorStore>();
+//builder.Services.AddScoped<IVectorStore, SqlServerVectorStore>();
 builder.Services.AddScoped<IPromptBuilder, RagPromptBuilder >();
 builder.Services.AddScoped<IDocumentSearchService, DocumentSearchService>();
 builder.Services.AddHttpClient<IOllamaClient, OllamaClient>();
@@ -125,9 +137,56 @@ builder.Services.AddScoped<AdaptiveRetrievalStrategy>();
 builder.Services.AddSingleton<IMmrSelector, MmrSelector>();
 builder.Services.AddSingleton<RetrievalConfidenceCalculator>();
 
+builder.Services.AddScoped<IInformationNeedDetector, InformationNeedDetector>();
+builder.Services.AddScoped<
+    IEvidenceCompletenessValidator,
+    EvidenceCompletenessValidator>();
+
 ///Quadrant Configurations
-builder.Services.AddHttpClient<IVectorStore, QdrantVectorStore>();
+var vectorStoreProvider =
+    builder.Configuration["VectorStore:Provider"];
+
+if (string.Equals(
+        vectorStoreProvider,
+        "Qdrant",
+        StringComparison.OrdinalIgnoreCase))
+{
+    builder.Services.AddHttpClient<QdrantVectorStore>();
+
+    builder.Services.AddScoped<IVectorStore>(sp =>
+        sp.GetRequiredService<QdrantVectorStore>());
+}
+else if (string.Equals(
+             vectorStoreProvider,
+             "SqlServer",
+             StringComparison.OrdinalIgnoreCase))
+{
+    builder.Services.AddScoped<IVectorStore, SqlServerVectorStore>();
+}
+else
+{
+    throw new InvalidOperationException(
+        $"Unsupported vector store provider: " +
+        $"{vectorStoreProvider}");
+}
+
+
+
 var app = builder.Build();
+
+if (string.Equals(
+        vectorStoreProvider,
+        "Qdrant",
+        StringComparison.OrdinalIgnoreCase))
+{
+    using var scope = app.Services.CreateScope();
+
+    var qdrantStore =
+        scope.ServiceProvider
+            .GetRequiredService<QdrantVectorStore>();
+
+    await qdrantStore.EnsureCollectionAsync();
+}
 
 // Configure the HTTP request pipeline.
 

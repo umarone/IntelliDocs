@@ -4,6 +4,7 @@ using AIChatAssistant.Models;
 using AIChatAssistant.Models.AI.Search;
 using AIChatAssistant.Models.AI.VectorStore;
 using Microsoft.Extensions.Options;
+using System.Diagnostics;
 
 namespace AIChatAssistant.Services.AI.Knowledge
 {
@@ -57,9 +58,17 @@ namespace AIChatAssistant.Services.AI.Knowledge
          float similarityThreshold = 0.5f,
          string queryType = "Unknown")
         {
+            var embedingstart = Stopwatch.GetTimestamp();
             var embedding =
                 await _embeddingProvider
                     .GenerateEmbeddingAsync(searchQuery);
+
+            var embedingelapsed = Stopwatch.GetElapsedTime(embedingstart);
+            Console.WriteLine(
+    $"Embedding generation time: " +
+    $"{embedingelapsed.TotalMilliseconds:F0} ms");
+
+            var vectorstart = Stopwatch.GetTimestamp();
 
             var vectorResults =
                 await _vectorStore.SearchAsync(
@@ -67,6 +76,10 @@ namespace AIChatAssistant.Services.AI.Knowledge
                     filter,
                     topK,
                     similarityThreshold);
+            var vectorElapsed = Stopwatch.GetElapsedTime(vectorstart);
+            Console.WriteLine(
+    $"Vector search time: " +
+    $"{vectorElapsed.TotalMilliseconds:F0} ms");
 
             //foreach (var item in vectorResults)
             //{
@@ -76,12 +89,18 @@ namespace AIChatAssistant.Services.AI.Knowledge
 
             Console.WriteLine(
                 $"Vector results: {vectorResults.Count}");
+            var keywordStart = Stopwatch.GetTimestamp();
 
             var keywordResults =
                 await _keywordSearchService.SearchAsync(
                     searchQuery,
                     filter,
                     topK);
+
+            var keywordElapsed = Stopwatch.GetElapsedTime(keywordStart);
+            Console.WriteLine(
+    $"Keyword search time: " +
+    $"{keywordElapsed.TotalMilliseconds:F0} ms");
 
             Console.WriteLine(
                 $"Keyword results: {keywordResults.Count}");
@@ -98,6 +117,95 @@ namespace AIChatAssistant.Services.AI.Knowledge
             }
 
             return hybridResults;
+        }
+
+        public async Task<List<SearchResult>> RetrieveCandidatesAsync(
+    IReadOnlyList<string> searchQueries,
+    SearchFilter? filter = null,
+    int topK = 10,
+    float similarityThreshold = 0.5f,
+    string queryType = "Unknown")
+        {
+            if (searchQueries == null || searchQueries.Count == 0)
+            {
+                return [];
+            }
+
+            var embeddingStart = Stopwatch.GetTimestamp();
+
+            var embeddings =
+                await _embeddingProvider.GenerateEmbeddingsAsync(
+                    searchQueries);
+
+            var embeddingElapsed =
+                Stopwatch.GetElapsedTime(embeddingStart);
+
+            Console.WriteLine(
+                $"Batch embedding generation time: " +
+                $"{embeddingElapsed.TotalMilliseconds:F0} ms");
+
+            if (embeddings.Count != searchQueries.Count)
+            {
+                throw new InvalidOperationException(
+                    "The number of embeddings returned does not match the number of search queries.");
+            }
+
+            var allCandidates =
+                new List<SearchResult>();
+
+            for (int i = 0; i < searchQueries.Count; i++)
+            {
+                var query = searchQueries[i];
+                var embedding = embeddings[i];
+
+                var vectorStart = Stopwatch.GetTimestamp();
+
+                var vectorResults =
+                    await _vectorStore.SearchAsync(
+                        embedding,
+                        filter,
+                        topK,
+                        similarityThreshold);
+
+                var vectorElapsed =
+                    Stopwatch.GetElapsedTime(vectorStart);
+
+                Console.WriteLine(
+                    $"Vector search [{i + 1}] time: " +
+                    $"{vectorElapsed.TotalMilliseconds:F0} ms");
+
+                var keywordStart = Stopwatch.GetTimestamp();
+
+                var keywordResults =
+                    await _keywordSearchService.SearchAsync(
+                        query,
+                        filter,
+                        topK);
+
+                var keywordElapsed =
+                    Stopwatch.GetElapsedTime(keywordStart);
+
+                Console.WriteLine(
+                    $"Keyword search [{i + 1}] time: " +
+                    $"{keywordElapsed.TotalMilliseconds:F0} ms");
+
+                var hybridResults =
+                    FuseResults(
+                        vectorResults,
+                        keywordResults,
+                        topK);
+
+                foreach (var result in hybridResults)
+                {
+                    result.SearchQuery = query;
+                    result.QueryType = queryType;
+                }
+
+                allCandidates.AddRange(
+                    hybridResults);
+            }
+
+            return allCandidates;
         }
 
         public async Task<List<SearchResult>> RerankAsync(

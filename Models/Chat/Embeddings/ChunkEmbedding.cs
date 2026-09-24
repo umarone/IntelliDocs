@@ -1,9 +1,8 @@
-﻿namespace AIChatAssistant.Models.AI.Embeddings
-{
-    public class ChunkEmbedding
-    {
-        public Guid ChunkId { get; set; }
+﻿namespace AIChatAssistant.Models.Chat.Embeddings;
 
-        public float[] Vector { get; set; } = [];
-    }
+public class ChunkEmbedding
+{
+    public Guid ChunkId { get; set; }
+
+    public float[] Vector { get; set; } = [];
 }

@@ -18,8 +18,8 @@ namespace AIChatAssistant.Controllers
             _documentRepository = documentRepository;
         }
         [ HttpPost("upload")]
-public async Task<IActionResult> Upload(
-    IFormFile file)
+        public async Task<IActionResult> Upload(
+         IFormFile file)
         {
             if (file == null || file.Length == 0)
             {
@@ -39,6 +39,40 @@ public async Task<IActionResult> Upload(
             await _documentService.ProcessAsync(document);
             return Ok("Document indexed successfully.");
         }
+        
+        [HttpPut("{documentId:guid}")]
+        public async Task<IActionResult> Update(Guid documentId, IFormFile file)
+        {
+            if (file == null || file.Length == 0)
+            {
+                return BadRequest("No file uploaded.");
+            }
+
+            var existingDocument =
+                await _documentRepository.GetAsync(documentId);
+
+            if (existingDocument == null)
+            {
+                return NotFound("Document not found.");
+            }
+
+            using var memoryStream = new MemoryStream();
+
+            await file.CopyToAsync(memoryStream);
+
+            var document = new Document
+            {
+                DocumentId = existingDocument.DocumentId,
+                FileName = file.FileName,
+                ContentType = file.ContentType,
+                UploadedAt = DateTime.UtcNow,
+                Content = memoryStream.ToArray()
+            };
+
+            await _documentService.UpdateAsync(document);
+
+            return Ok("Document updated successfully.");
+        }
         [HttpGet]
         public async Task<IActionResult> GetAll()
         {
@@ -53,6 +87,20 @@ public async Task<IActionResult> Upload(
             });
 
             return Ok(result);
+        }
+        [HttpDelete("{documentId:guid}")]
+        public async Task<IActionResult> Delete(Guid documentId)
+        {
+            var document = await _documentRepository.GetAsync(documentId);
+
+            if (document == null)
+            {
+                return NotFound("Document not found.");
+            }
+
+            await _documentService.DeleteAsync(documentId);
+
+            return Ok("Document deleted successfully.");
         }
     }
 }

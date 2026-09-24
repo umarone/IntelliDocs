@@ -7,8 +7,15 @@ namespace AIChatAssistant.Services.AI.Prompt
     {
         public int Order => 0;
 
-        public IEnumerable<OllamaChatMessage> Build(ChatRequest request, PromptContext context)
+        public IEnumerable<OllamaChatMessage> Build(
+            ChatRequest request,
+            PromptContext context)
         {
+            if (context.IsRagMode)
+            {
+                yield break;
+            }
+
             yield return new OllamaChatMessage
             {
                 Role = "system",

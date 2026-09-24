@@ -1,6 +1,9 @@
-﻿using AIChatAssistant.Interfaces;
+﻿using AIChatAssistant.Configuration;
+using AIChatAssistant.Interfaces;
 using AIChatAssistant.Models.AI.Search;
 using AIChatAssistant.Models.AI.VectorStore;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 using System.Text;
 using System.Text.Json;
 
@@ -9,16 +12,18 @@ namespace AIChatAssistant.Services.AI.RAGPipeline
     public class ContextualCompressor : IContextualCompressor
     {
         private readonly IChatCompletionService _chatCompletionService;
-
+        private readonly RagOptions _optoins;
         public ContextualCompressor(
-            IChatCompletionService chatCompletionService)
+            IChatCompletionService chatCompletionService, IOptions<RagOptions> options)
         {
             _chatCompletionService = chatCompletionService;
+            _optoins = options.Value;
         }
 
         public async Task<IReadOnlyList<SearchResult>> CompressAsync(
             string question,
             IReadOnlyList<SearchResult> results,
+            IReadOnlyList<SearchResult> finalResults,
             CancellationToken cancellationToken = default)
         {
             // ==========================================
@@ -64,7 +69,8 @@ namespace AIChatAssistant.Services.AI.RAGPipeline
             var userPrompt =
                 BuildUserPrompt(
                     question,
-                    validResults);
+                    validResults,
+                    finalResults);
 
             Console.WriteLine(
                 "========= BATCH CONTEXT COMPRESSION =========");
@@ -254,6 +260,27 @@ namespace AIChatAssistant.Services.AI.RAGPipeline
             12. Evaluate every CONTEXT ITEM independently.
 
             ========================================
+            MMR SELECTED EVIDENCE
+            ========================================
+
+            The MMR SELECTED RECORDS section identifies the records
+            selected by the retrieval pipeline as the primary evidence
+            for the USER QUESTION.
+
+            Treat these RecordIds as the primary evidence anchors.
+
+            Context surrounding an MMR-selected record may provide
+            supporting information, but it must not replace or
+            contradict the information contained in the selected record.
+
+            Use only information explicitly contained in the provided
+            CONTEXT ITEMS.
+
+            Do not treat an MMR selection as proof that every part of
+            its expanded context is relevant.
+
+            ========================================
+
             RELEVANCE RULE
             ========================================
 
@@ -304,7 +331,8 @@ namespace AIChatAssistant.Services.AI.RAGPipeline
 
         private static string BuildUserPrompt(
             string question,
-            IReadOnlyList<SearchResult> results)
+            IReadOnlyList<SearchResult> results,
+            IReadOnlyList<SearchResult> finalResults)
         {
             var builder =
                 new StringBuilder();
@@ -312,18 +340,26 @@ namespace AIChatAssistant.Services.AI.RAGPipeline
             builder.AppendLine(
                 "USER QUESTION");
 
-            builder.AppendLine(
-                "========================================");
+            builder.AppendLine("========================================");
 
             builder.AppendLine(question);
 
             builder.AppendLine();
 
+            builder.AppendLine("MMR SELECTED RECORDS");
+
+            builder.AppendLine("========================================");
+
+            foreach (var result in finalResults)
+            {
+                builder.AppendLine(
+                    result.Record.Id.ToString());
+            }
+
             builder.AppendLine(
                 "CONTEXT ITEMS");
 
-            builder.AppendLine(
-                "========================================");
+            builder.AppendLine("========================================");
 
             foreach (var result in results)
             {
@@ -336,8 +372,7 @@ namespace AIChatAssistant.Services.AI.RAGPipeline
                 builder.AppendLine(
                     result.Record.Content);
 
-                builder.AppendLine(
-                    "----------------------------------------");
+                builder.AppendLine("----------------------------------------");
             }
 
             return builder.ToString();
@@ -432,31 +467,74 @@ namespace AIChatAssistant.Services.AI.RAGPipeline
         //=============================================================
         // Skip Compressional making optional
         //=============================================================
+
         private static bool ShouldSkipCompression(
     IReadOnlyList<SearchResult> results)
         {
-            // Compression is unnecessary when there are only a few
-            // highly relevant, reasonably small contexts.
-
-            if (results.Count > 2)
-            {
-                return false;
-            }
-
-            // If any result has a weak rerank score,
-            // compression may still be useful.
-            if (results.Any(r => r.RerankScore < 0.80f))
-            {
-                return false;
-            }
-
             // Avoid sending unnecessarily large contexts to the LLM.
-            const int maxTotalCharacters = 4000;
+            const int maxTotalCharacters = 5000;
 
             var totalCharacters =
                 results.Sum(r =>
                     r.Record.Content?.Length ?? 0);
 
+            Console.WriteLine(
+                $"Compression total characters: {totalCharacters}");
+
+            Console.WriteLine(
+                $"Compression result count: {results.Count}");
+
+            if (results.Count == 0)
+            {
+                return true;
+            }
+
+            // Compression is useful when the retrieved context
+            // is too large for efficient downstream processing.
+            if (totalCharacters > maxTotalCharacters)
+            {
+                return false;
+            }
+
+            // If all retrieved results have reasonable semantic
+            // similarity, the existing context can be used directly.
+            const float minimumSimilarity = 0.55f;
+
+            if (results.Any(r =>
+                r.Similarity < minimumSimilarity))
+            {
+                return false;
+            }
+
+            return true;
+        }
+        private static bool ShouldSkipCompression1(
+    IReadOnlyList<SearchResult> results,
+    float rerankThreshold)
+        {
+            // Avoid sending unnecessarily large contexts to the LLM.
+            const int maxTotalCharacters = 5000;
+
+            var totalCharacters =
+                results.Sum(r =>
+                    r.Record.Content?.Length ?? 0);
+
+            Console.WriteLine(
+                $"Compression total characters: {totalCharacters}");
+
+            Console.WriteLine(
+                $"Compression result count: {results.Count}");
+
+            // If any result has a weak rerank score,
+            // compression may still be useful.
+            if (results.Any(r =>
+                r.RerankScore < rerankThreshold))
+            {
+                return false;
+            }
+
+            // Skip compression when all results are sufficiently
+            // relevant and the total context is reasonably small.
             return totalCharacters <= maxTotalCharacters;
         }
     }

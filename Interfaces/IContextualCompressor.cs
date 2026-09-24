@@ -6,7 +6,8 @@ namespace AIChatAssistant.Interfaces
     {
         Task<IReadOnlyList<SearchResult>> CompressAsync(
         string question,
-        IReadOnlyList<SearchResult> results,
+        IReadOnlyList<SearchResult> contextResults,
+        IReadOnlyList<SearchResult> finalResults,
         CancellationToken cancellationToken = default);
     }
 }

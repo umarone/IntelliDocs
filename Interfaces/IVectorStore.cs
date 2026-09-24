@@ -20,5 +20,7 @@ namespace AIChatAssistant.Interfaces
         float[] queryVector,
         SearchFilter? filter,
         int topK, float similarityThreshold);
+
+        Task DeleteAsync(Guid documentId);
     }
 }

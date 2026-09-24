@@ -1,4 +1,4 @@
-﻿using AIChatAssistant.Models.AI.Embeddings;
+﻿using AIChatAssistant.Models.Chat.Embeddings;
 using AIChatAssistant.Models.AI.VectorStore;
 using AIChatAssistant.Models.Documents;
 

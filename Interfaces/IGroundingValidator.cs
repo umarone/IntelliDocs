@@ -8,6 +8,6 @@ namespace AIChatAssistant.Interfaces
         Task<GroundingValidationResult> ValidateAsync(
        string question,
        string answer,
-       IReadOnlyList<SearchResult> searchResults);
+       IReadOnlyList<string> selectedEvidence);
     }
 }

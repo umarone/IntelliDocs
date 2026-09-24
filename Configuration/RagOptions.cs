@@ -4,7 +4,7 @@
     {
         public int TopK { get; set; } = 5;
         public float SimilarityThreshold { get; set; } = 0.5f;
-        public float RerankThreshold { get; set; } = 0.5f;
+        public float RerankThreshold { get; set; } = 0.2f;
         public int ContextWindow { get; set; }
 
         // Corrective retrieval

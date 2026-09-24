@@ -72,7 +72,7 @@ namespace AIChatAssistant.Services.AI.Ollama
                 ]
             };
         }
-        private OllamaChatRequest CreateStructuredRequest(
+        private OllamaChatRequest CreateStructuredRequest1(
         string systemPrompt,
         string userPrompt)
         {
@@ -98,6 +98,39 @@ namespace AIChatAssistant.Services.AI.Ollama
 
                 Options =
                     new OllamaGenerationOptions
+                    {
+                        Temperature = 0,
+                        Seed = 42
+                    }
+            };
+        }
+        private OllamaChatRequest CreateStructuredRequest(
+    string systemPrompt,
+    string userPrompt)
+        {
+            return new OllamaChatRequest
+            {
+                Model = _options.ChatModel,
+                Stream = false,
+
+                Messages =
+                [
+                    new OllamaChatMessage
+                    {
+                        Role = "system",
+                        Content = systemPrompt
+                    },
+
+                    new OllamaChatMessage
+                    {
+                        Role = "user",
+                        Content = userPrompt
+                    }
+                ],
+
+                Format = "json",
+
+                Options = new OllamaGenerationOptions
                     {
                         Temperature = 0,
                         Seed = 42

@@ -20,17 +20,16 @@ namespace AIChatAssistant.Services.AI.Validators
             _ollamaClient = ollamaClient;
         }
         public async Task<GroundingValidationResult> ValidateAsync(
-            string question,
-            string answer,
-            IReadOnlyList<SearchResult> searchResults)
+        string question,
+        string answer,
+        IReadOnlyList<string> selectedEvidence)
         {
-
             var directCheckStart = Stopwatch.GetTimestamp();
 
             var directlySupported =
                 IsDirectlySupported(
                     answer,
-                    searchResults);
+                    selectedEvidence);
 
             var directCheckElapsed =
                 Stopwatch.GetElapsedTime(directCheckStart);
@@ -43,117 +42,165 @@ namespace AIChatAssistant.Services.AI.Validators
             {
                 Console.WriteLine(
                     "Grounding validation skipped: " +
-                    "answer is directly supported by the knowledge base.");
+                    "answer is directly supported by the selected evidence.");
 
                 return new GroundingValidationResult
                 {
                     Grounded = true,
                     Reason =
-                        "The generated answer is directly supported by the knowledge base."
+                        "The generated answer is directly supported by the selected evidence."
                 };
             }
 
-            Console.WriteLine("========= SEARCH RESULTS BEFORE KNOWLEDGE BASE =========");
+            Console.WriteLine(
+                "========= SELECTED EVIDENCE BEFORE KNOWLEDGE BASE =========");
 
-            foreach (var result in searchResults)
+            foreach (var evidence in selectedEvidence)
             {
-                Console.WriteLine("----- RESULT -----");
-                Console.WriteLine(result.Record.Content);
+                Console.WriteLine("----- EVIDENCE -----");
+                Console.WriteLine(evidence);
             }
 
-
             var knowledgeBase =
-                searchResults.Count == 0
+                selectedEvidence.Count == 0
                     ? "NO KNOWLEDGE AVAILABLE"
                     : string.Join(
                         "\n",
-                        searchResults
-                            .Select(r => r.Record.Content)
-                            .Where(c => !string.IsNullOrWhiteSpace(c)));
+                        selectedEvidence
+                            .Where(e => !string.IsNullOrWhiteSpace(e)));
 
-            string systemPrompt = """
-You are a strict grounding validator for a knowledge retrieval system.
+            var systemPrompt = """
+            You are a strict factual grounding validator for a generic knowledge retrieval system.
 
-Your task is to determine whether the GENERATED ANSWER is fully supported
-by the KNOWLEDGE BASE.
+            Your ONLY task is to determine whether every factual claim in the GENERATED ANSWER
+            is supported by the KNOWLEDGE BASE.
 
-GROUNDING RULES
-========================================
+            GROUNDING PRINCIPLE
+            ========================================
 
-1. Validate only factual claims that are actually stated in the GENERATED ANSWER.
+            The GENERATED ANSWER may contain ONLY factual information that is explicitly
+            supported by the KNOWLEDGE BASE.
 
-2. First identify the factual claims made by the GENERATED ANSWER.
-   Do not create, infer, reconstruct, or add claims that the answer does not state.
+            A claim is supported when the KNOWLEDGE BASE directly states the same fact
+            or states information that is a faithful paraphrase of that fact.
 
-3. The KNOWLEDGE BASE is evidence only.
-   Facts that appear in the KNOWLEDGE BASE but are not stated in the
-   GENERATED ANSWER are irrelevant to the grounding decision.
+            IMPORTANT:
+            The knowledge base does NOT need to contain a formal definition, heading,
+            explanation, or specific wording for a fact to be supported.
 
-4. Do not use pretrained knowledge, outside information, assumptions,
-   or general knowledge.
+            Evaluate factual support, not whether the knowledge base contains a
+            formal definition.
 
-5. A claim is grounded when its factual meaning is explicitly supported
-   by the KNOWLEDGE BASE, including faithful paraphrasing or summarization.
+            STRICT RULES
+            ========================================
 
-6. A claim is not grounded when it adds information, changes the meaning,
-   or requires information that is not supported by the KNOWLEDGE BASE.
+            1. Identify each factual claim in the GENERATED ANSWER.
 
-7. The USER QUESTION is not evidence. Use it only to understand what
-   the GENERATED ANSWER is addressing.
+            2. Check each factual claim against the KNOWLEDGE BASE.
 
-8. If the GENERATED ANSWER contains multiple factual claims, every claim
-   must be supported for the answer to be considered grounded.
+            3. Mark a claim as grounded when its factual meaning is explicitly supported
+               by the KNOWLEDGE BASE.
 
-9. If the GENERATED ANSWER contains no factual claims, consider it grounded.
+            4. A faithful paraphrase of an explicitly stated fact is grounded.
 
-10. Do not reject an answer because the KNOWLEDGE BASE contains additional
-    information that the answer does not mention.
+            5. Do not require the exact wording used in the KNOWLEDGE BASE.
 
-11. Return grounded=true only when the GENERATED ANSWER is fully supported
-    by the KNOWLEDGE BASE.
+            6. Do not require a formal definition unless the GENERATED ANSWER itself
+               makes a claim that requires information not present in the KNOWLEDGE BASE.
 
-12. Return grounded=false if any factual claim in the GENERATED ANSWER
-    is unsupported.
+            7. Do not use pretrained knowledge.
 
-OUTPUT FORMAT
-========================================
+            8. Do not use outside knowledge.
 
-Return only valid JSON:
+            9. Do not use assumptions.
 
-{
-  "grounded": true or false,
-  "reason": "brief reason"
-}
+            10. Do not use common knowledge.
 
-For grounded=true, the reason must state that the factual claims in the
-GENERATED ANSWER are supported by the KNOWLEDGE BASE.
+            11. Do not use the USER QUESTION as evidence.
 
-For grounded=false, identify the unsupported claim without adding facts
-from your own knowledge.
+            12. Do not infer facts that are not stated in the KNOWLEDGE BASE.
 
-Do not return markdown, explanations outside the JSON, or additional fields.
-""";
+            RELATIONSHIPS AND INFERENCES
+            ========================================
 
+            13. Do not infer a relationship merely because two concepts appear
+                in the KNOWLEDGE BASE.
 
-           
+            14. If the KNOWLEDGE BASE states facts about two concepts separately,
+                this does not automatically support a claim that those concepts
+                are related.
+
+            15. A relationship, comparison, dependency, interaction, compatibility,
+                or connection is grounded only when that specific relationship is
+                explicitly supported by the KNOWLEDGE BASE.
+
+            16. Do not combine separate facts to create a new factual conclusion.
+
+            PARTIAL ANSWERS
+            ========================================
+
+            17. The GENERATED ANSWER does not need to include every fact in the
+                KNOWLEDGE BASE.
+
+            18. Do not reject an answer because it omits information.
+
+            19. Validate only the factual claims actually present in the GENERATED ANSWER.
+
+            20. If every factual claim in the GENERATED ANSWER is supported,
+                return grounded=true.
+
+            21. If even one factual claim is unsupported, return grounded=false.
+
+            22. When grounded=false, identify the specific unsupported claim.
+
+            23. Do not introduce new facts when explaining why a claim is unsupported.
+
+            NON-FACTUAL CONTENT
+            ========================================
+
+            24. Do not reject grammar, wording, formatting, or style.
+
+            25. If the GENERATED ANSWER contains no factual claims, return grounded=true.
+
+            OUTPUT FORMAT
+            ========================================
+
+            Return ONLY valid JSON using this exact structure:
+
+            {
+              "grounded": true,
+              "reason": "brief reason"
+            }
+
+            For grounded=true:
+            The reason must state that every factual claim in the GENERATED ANSWER
+            is supported by the KNOWLEDGE BASE.
+
+            For grounded=false:
+            The reason must identify the specific unsupported factual claim.
+
+            Do not return markdown.
+            Do not return explanations outside the JSON.
+            Do not return additional fields.
+            """;
 
             string userPrompt = $@"========================================
-            KNOWLEDGE BASE
-            ========================================
+    KNOWLEDGE BASE
+    ========================================
 
-            {knowledgeBase}
+    {knowledgeBase}
 
-            ========================================
-            USER QUESTION
-            ========================================
+    ========================================
+    USER QUESTION
+    ========================================
 
-            {question}
+    {question}
 
-            ========================================
-            GENERATED ANSWER
-            ========================================
+    ========================================
+    GENERATED ANSWER
+    ========================================
 
-            {answer}";
+    {answer}";
 
             var schema = new
             {
@@ -173,12 +220,15 @@ Do not return markdown, explanations outside the JSON, or additional fields.
                 additionalProperties = false
             };
 
-            Console.WriteLine("========= KB SENT TO GROUNDING =========");
+            Console.WriteLine(
+                "========= KB SENT TO GROUNDING =========");
+
             Console.WriteLine(knowledgeBase);
 
-            Console.WriteLine("========= ANSWER SENT TO GROUNDING =========");
-            Console.WriteLine(answer);
+            Console.WriteLine(
+                "========= ANSWER SENT TO GROUNDING =========");
 
+            Console.WriteLine(answer);
 
             var request = new OllamaChatRequest
             {
@@ -195,15 +245,15 @@ Do not return markdown, explanations outside the JSON, or additional fields.
                 Messages =
                 [
                     new OllamaChatMessage
-                    {
-                        Role = "system",
-                        Content = systemPrompt
-                    },
-                    new OllamaChatMessage
-                    {
-                        Role = "user",
-                        Content = userPrompt
-                    }
+            {
+                Role = "system",
+                Content = systemPrompt
+            },
+            new OllamaChatMessage
+            {
+                Role = "user",
+                Content = userPrompt
+            }
                 ]
             };
 
@@ -249,12 +299,13 @@ Do not return markdown, explanations outside the JSON, or additional fields.
                     "The grounding validator returned an invalid response."
             };
         }
+
         private static bool IsDirectlySupported(
-     string answer,
-     IReadOnlyList<SearchResult> searchResults)
+        string answer,
+        IReadOnlyList<string> selectedEvidence)
         {
             if (string.IsNullOrWhiteSpace(answer) ||
-                searchResults.Count == 0)
+                selectedEvidence.Count == 0)
             {
                 return false;
             }
@@ -267,10 +318,8 @@ Do not return markdown, explanations outside the JSON, or additional fields.
                 return false;
             }
 
-            foreach (var result in searchResults)
+            foreach (var content in selectedEvidence)
             {
-                var content = result.Record.Content;
-
                 if (string.IsNullOrWhiteSpace(content))
                 {
                     continue;

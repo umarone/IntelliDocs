@@ -1,6 +1,6 @@
 ﻿using AIChatAssistant.Configuration;
 using AIChatAssistant.Interfaces;
-using AIChatAssistant.Models.AI.Embeddings;
+using AIChatAssistant.Models.Chat.Embeddings;
 using AIChatAssistant.Models.AI.Providers.Ollama;
 using AIChatAssistant.Models.Chat;
 using AIChatAssistant.Models.Ollama;
@@ -44,6 +44,31 @@ namespace AIChatAssistant.Services.Documents.Embeddings.Providers
             var response = await SendToOllamaAsync(request);
 
             return response.Embeddings.First();
+        }
+        public async Task<IReadOnlyList<float[]>> GenerateEmbeddingsAsync(
+    IReadOnlyList<string> texts)
+        {
+            if (texts == null || texts.Count == 0)
+            {
+                return [];
+            }
+
+            var request = new OllamaEmbeddingRequest
+            {
+                Model = _options.EmbeddingModel,
+                Input = texts.ToList()
+            };
+
+            var response =
+                await SendToOllamaAsync(request);
+
+            if (response.Embeddings.Count != texts.Count)
+            {
+                throw new InvalidOperationException(
+                    "The number of embeddings returned by Ollama does not match the number of input texts.");
+            }
+
+            return response.Embeddings;
         }
         //    private List<OllamaChatMessage> BuildMessages(
         //ChatRequest request)

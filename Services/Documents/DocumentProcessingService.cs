@@ -1,5 +1,5 @@
 ﻿using AIChatAssistant.Interfaces;
-using AIChatAssistant.Models.AI.Embeddings;
+using AIChatAssistant.Models.Chat.Embeddings;
 using AIChatAssistant.Models.AI.VectorStore;
 using AIChatAssistant.Models.Documents;
 using System.Reflection.Metadata;
@@ -34,15 +34,7 @@ namespace AIChatAssistant.Services.Documents
         {
             await _documentMetadataService.SaveAsync(document);
 
-            var content = await LoadContentAsync(document);
-
-            var chunks = CreateChunks(document, content);
-
-            var embeddings = await GenerateEmbeddingsAsync(chunks);
-
-            var vectorRecords = _vectorRecordFactory.Create(document, chunks, embeddings); //BuildVectorRecords(chunks, embeddings, document);
-
-            await SaveVectorsAsync(vectorRecords);
+            await ProcessVectorsAsync(document);
         }
         private async Task<string> LoadContentAsync(Document document)
         {
@@ -73,6 +65,38 @@ namespace AIChatAssistant.Services.Documents
         {
             return _vectorStore.SaveAsync(records);    
             
+        }
+
+        public async Task DeleteAsync(Guid documentId)
+        {
+            await _vectorStore.DeleteAsync(documentId);
+
+            await _documentMetadataService.DeleteAsync(documentId);
+        }
+
+        public async Task UpdateAsync(Document document)
+        {
+            await _vectorStore.DeleteAsync(document.DocumentId);
+
+            await _documentMetadataService.SaveAsync(document);
+
+            await ProcessVectorsAsync(document);
+        }
+        private async Task ProcessVectorsAsync(Document document)
+        {
+            var content = await LoadContentAsync(document);
+
+            var chunks = CreateChunks(document, content);
+
+            var embeddings = await GenerateEmbeddingsAsync(chunks);
+
+            var vectorRecords =
+                _vectorRecordFactory.Create(
+                    document,
+                    chunks,
+                    embeddings);
+
+            await SaveVectorsAsync(vectorRecords);
         }
     }
 }

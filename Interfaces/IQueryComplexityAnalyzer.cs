@@ -5,6 +5,6 @@ namespace AIChatAssistant.Interfaces
     public interface IQueryComplexityAnalyzer
     {
         Task<QueryComplexityResult> AnalyzeAsync(
-       string question);
+        string analysis);
     }
 }

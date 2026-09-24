@@ -8,17 +8,20 @@ namespace AIChatAssistant.Services.Documents.Chunking
     public class CharacterChunkingService : IChunkingService
     {
         private readonly ChunkingOptions _options;
+
         public CharacterChunkingService(
             IOptions<ChunkingOptions> options)
         {
             _options = options.Value;
         }
-      
-        public List<DocumentChunk> CreateChunks(Guid documentId, string content)
+
+        public List<DocumentChunk> CreateChunks(
+            Guid documentId,
+            string content)
         {
             if (string.IsNullOrWhiteSpace(content))
             {
-                return new List<DocumentChunk>();
+                return [];
             }
 
             if (_options.ChunkSize <= 0)
@@ -27,38 +30,69 @@ namespace AIChatAssistant.Services.Documents.Chunking
                     "ChunkSize must be greater than zero.");
             }
 
-            if (_options.ChunkOverlap >= _options.ChunkSize)
+            if (_options.ChunkOverlap < 0 ||
+                _options.ChunkOverlap >= _options.ChunkSize)
             {
                 throw new InvalidOperationException(
-                    "ChunkOverlap must be smaller than ChunkSize.");
+                    "ChunkOverlap must be zero or greater " +
+                    "and smaller than ChunkSize.");
             }
 
             var chunks = new List<DocumentChunk>();
 
             var position = 0;
             var chunkIndex = 0;
-            var overlap = content.Length <= _options.ChunkSize ? 0 : _options.ChunkOverlap;
 
-            var step = _options.ChunkSize - overlap;
-            //var step = _options.ChunkSize - _options.ChunkOverlap;
+            var step =
+                _options.ChunkSize -
+                _options.ChunkOverlap;
 
             while (position < content.Length)
             {
+                var remainingLength =
+                    content.Length - position;
+
                 var length = Math.Min(
                     _options.ChunkSize,
-                    content.Length - position);
+                    remainingLength);
 
-                var chunkContent = content.Substring(position, length);
+                var end = position + length;
 
-                chunks.Add(new DocumentChunk
+                if (end < content.Length)
                 {
-                    Id = Guid.NewGuid(),
-                    DocumentId = documentId,
-                    ChunkIndex = chunkIndex++,
-                    Content = chunkContent
-                });
+                    var boundary = content.LastIndexOf(
+                        ' ',
+                        end - 1,
+                        length);
 
-                position += step;
+                    if (boundary > position)
+                    {
+                        end = boundary;
+                    }
+                }
+
+                var chunkContent =
+                    content[position..end].Trim();
+
+                if (!string.IsNullOrWhiteSpace(chunkContent))
+                {
+                    chunks.Add(new DocumentChunk
+                    {
+                        Id = Guid.NewGuid(),
+                        DocumentId = documentId,
+                        ChunkIndex = chunkIndex++,
+                        Content = chunkContent
+                    });
+                }
+
+                var nextPosition = end - _options.ChunkOverlap;
+
+                if (nextPosition <= position)
+                {
+                    nextPosition = end;
+                }
+
+                position = nextPosition;
             }
 
             return chunks;

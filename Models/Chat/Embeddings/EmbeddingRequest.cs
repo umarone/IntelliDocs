@@ -1,6 +1,6 @@
 ﻿using AIChatAssistant.Models.Documents;
 
-namespace AIChatAssistant.Models.AI.Embeddings
+namespace AIChatAssistant.Models.Chat.Embeddings
 {
     public class EmbeddingRequest
     {

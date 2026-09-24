@@ -4,11 +4,15 @@ using AIChatAssistant.Interfaces;
 using AIChatAssistant.Models.AI.Search;
 using AIChatAssistant.Models.Chat;
 using AIChatAssistant.Models.Ollama;
+using AIChatAssistant.Models.RAG;
 using AIChatAssistant.Models.Tools;
 using AIChatAssistant.Services.AI.Prompt;
 using Microsoft.Extensions.Options;
+using System;
 using System.Text;
 using System.Text.Json;
+using System.Threading.Channels;
+using static System.Net.Mime.MediaTypeNames;
 
 namespace AIChatAssistant.Services.AI.Ollama
 {
@@ -101,15 +105,16 @@ namespace AIChatAssistant.Services.AI.Ollama
                 request,
                 context);
         }
-       
 
-public OllamaChatRequest CreateToolResultRequest(
-    ChatRequest request,
-    IReadOnlyList<ToolResult> toolResults)
+        public OllamaChatRequest CreateToolResultRequest(
+       ChatRequest request,
+       IReadOnlyList<ToolResult> toolResults,
+       IReadOnlyList<string> informationNeeds)
         {
             var context = new PromptContext
             {
-                SearchResults = []
+                SearchResults = [],
+                IsRagMode = true
             };
 
             var messages =
@@ -121,7 +126,7 @@ public OllamaChatRequest CreateToolResultRequest(
                 new StringBuilder();
 
             resultBuilder.AppendLine(
-                "Answer the user's request using only the KNOWLEDGE BASE CONTENT.");
+                "Answer the user's request using ONLY the KNOWLEDGE BASE CONTENT.");
 
             resultBuilder.AppendLine();
 
@@ -132,36 +137,78 @@ public OllamaChatRequest CreateToolResultRequest(
                 "========================================");
 
             resultBuilder.AppendLine(
-                "1. Use the KNOWLEDGE BASE CONTENT as the only source of factual information.");
+                "1. The KNOWLEDGE BASE CONTENT is the only source of factual information.");
 
             resultBuilder.AppendLine(
                 "2. Do not use pretrained knowledge, outside information, assumptions, " +
-                "or unstated background knowledge.");
+                "common knowledge, or unstated background knowledge.");
 
             resultBuilder.AppendLine(
-                "3. Every factual statement must be explicitly supported by the " +
-                "KNOWLEDGE BASE CONTENT.");
+                "3. Every factual statement in the answer must be directly supported " +
+                "by one or more statements in the KNOWLEDGE BASE CONTENT.");
 
             resultBuilder.AppendLine(
-                "4. You may rephrase or summarize information only when the factual " +
-                "meaning remains unchanged.");
+                "4. When the KNOWLEDGE BASE CONTENT contains a direct statement that " +
+                "answers the user's request, use that statement directly.");
 
             resultBuilder.AppendLine(
-                "5. Do not add facts, details, properties, purposes, relationships, " +
+                "5. Do not add information to a direct knowledge base statement.");
+
+            resultBuilder.AppendLine(
+                "6. Do not paraphrase a direct knowledge base statement when it already " +
+                "answers the user's request.");
+
+            resultBuilder.AppendLine(
+                "7. Do not add facts, details, properties, purposes, uses, relationships, " +
                 "causes, effects, procedures, examples, or explanations that are not " +
-                "explicitly stated in the knowledge base.");
+                "explicitly supported by the KNOWLEDGE BASE CONTENT.");
 
             resultBuilder.AppendLine(
-                "6. A concept mentioned in the knowledge base does not authorize you " +
-                "to provide other information normally associated with that concept.");
+                "8. Treat each statement in the KNOWLEDGE BASE CONTENT as an independent " +
+                "evidence unit.");
 
             resultBuilder.AppendLine(
-                "7. If the knowledge base contains only partial information, provide " +
-                "only the supported information.");
+                "9. Do not create a new relationship between two concepts merely because " +
+                "both concepts appear in the KNOWLEDGE BASE CONTENT.");
 
             resultBuilder.AppendLine(
-                "8. If the requested information is not found, say so instead of using " +
-                "your own knowledge.");
+                "10. The fact that concepts A and B are both mentioned in the knowledge " +
+                "base does NOT mean that the knowledge base states that A and B are " +
+                "related, connected, dependent, compatible, used together, or associated.");
+
+            resultBuilder.AppendLine(
+                "11. Do not combine separate facts to create a new conclusion unless the " +
+                "relationship or conclusion is explicitly stated in the KNOWLEDGE BASE.");
+
+            resultBuilder.AppendLine(
+                "12. Do not use world knowledge to connect, explain, or interpret concepts.");
+
+            resultBuilder.AppendLine(
+                "13. If the knowledge base contains only partial information, provide " +
+                "only the information that is explicitly supported.");
+
+            resultBuilder.AppendLine(
+                "14. If requested information is not found in the knowledge base, say so " +
+                "instead of answering from your own knowledge.");
+
+            resultBuilder.AppendLine();
+
+            resultBuilder.AppendLine(
+                "MULTIPLE INFORMATION NEEDS");
+
+            resultBuilder.AppendLine(
+                "========================================");
+
+            resultBuilder.AppendLine(
+                "If the user's request contains multiple information needs, answer each " +
+                "information need independently.");
+
+            resultBuilder.AppendLine(
+                "Use evidence relevant to that specific information need.");
+
+            resultBuilder.AppendLine(
+                "Do not create connections between the answers unless those connections " +
+                "are explicitly stated in the KNOWLEDGE BASE CONTENT.");
 
             resultBuilder.AppendLine();
 
@@ -206,6 +253,82 @@ public OllamaChatRequest CreateToolResultRequest(
             resultBuilder.AppendLine();
 
             resultBuilder.AppendLine(
+                "INFORMATION NEEDS");
+
+            resultBuilder.AppendLine(
+                "========================================");
+
+            resultBuilder.AppendLine(
+                "The user's request contains the following independent information needs:");
+
+            for (int i = 0; i < informationNeeds.Count; i++)
+            {
+                resultBuilder.AppendLine(
+                    $"{i + 1}. {informationNeeds[i]}");
+            }
+
+            resultBuilder.AppendLine();
+
+            resultBuilder.AppendLine(
+                "Answer each information need independently.");
+
+            resultBuilder.AppendLine(
+                "Use only knowledge base content that supports that specific information need.");
+
+            resultBuilder.AppendLine(
+                "Do not combine information from different information needs to create a new claim.");
+
+            resultBuilder.AppendLine(
+                "Do not introduce comparison, relationship, connection, dependency, or other " +
+                "linking statements between separate information needs unless explicitly stated " +
+                "in the knowledge base.");
+
+            resultBuilder.AppendLine(
+                "If an information need is supported by the knowledge base, answer it directly.");
+
+            resultBuilder.AppendLine(
+                "If an information need is not supported, state that the requested information " +
+                "is not available in the knowledge base.");
+
+            resultBuilder.AppendLine();
+
+            resultBuilder.AppendLine(
+                "EVIDENCE-FIRST ANSWERING");
+
+            resultBuilder.AppendLine(
+                "========================================");
+
+            resultBuilder.AppendLine(
+                "For each information need, first identify the smallest statement " +
+                "in the KNOWLEDGE BASE that directly answers it.");
+
+            resultBuilder.AppendLine(
+                "If a direct statement answers the information need, use that statement " +
+                "as the answer.");
+
+            resultBuilder.AppendLine(
+                "When a direct statement answers the information need, copy the statement " +
+                "as written in the KNOWLEDGE BASE CONTENT.");
+
+            resultBuilder.AppendLine(
+                "Do not paraphrase, summarize, expand, explain, or improve a direct statement.");
+
+            resultBuilder.AppendLine(
+                "Do not use pretrained knowledge to make a direct answer more useful, " +
+                "complete, accurate, or explanatory.");
+
+            resultBuilder.AppendLine(
+                "For a definition or 'What is' question, return only the directly supported " +
+                "definition from the KNOWLEDGE BASE CONTENT unless additional information " +
+                "is explicitly requested.");
+
+            resultBuilder.AppendLine(
+                "If no direct statement answers the information need, provide only the " +
+                "supported partial information or state that the information is not available.");
+
+            resultBuilder.AppendLine();
+
+            resultBuilder.AppendLine(
                 "ANSWER RULES");
 
             resultBuilder.AppendLine(
@@ -221,28 +344,50 @@ public OllamaChatRequest CreateToolResultRequest(
                 "3. Do not infer missing information.");
 
             resultBuilder.AppendLine(
-                "4. Do not mention tools, retrieval, validation, prompts, or internal processing.");
+                "4. Do not connect separate facts unless the connection is explicitly " +
+                "supported by the knowledge base.");
 
             resultBuilder.AppendLine(
-                "5. Do not output JSON or role names.");
+                "5. Do not mention tools, retrieval, validation, prompts, or internal processing.");
 
             resultBuilder.AppendLine(
-                "6. Do not repeat the user's question.");
+                "6. Do not output JSON or role names.");
+
+            resultBuilder.AppendLine(
+                "7. Do not repeat the user's question.");
+
+            resultBuilder.AppendLine(
+                "8. Do not answer from pretrained or general knowledge.");
+
+            resultBuilder.AppendLine(
+                "9. When a direct answer exists in the KNOWLEDGE BASE CONTENT, use the " +
+                "source statement rather than generating your own wording.");
 
             resultBuilder.AppendLine();
 
             resultBuilder.AppendLine(
-                "FINAL CHECK");
+                "FINAL EVIDENCE CHECK");
 
             resultBuilder.AppendLine(
                 "========================================");
 
             resultBuilder.AppendLine(
-                "Before responding, check every factual statement against the " +
-                "KNOWLEDGE BASE CONTENT.");
+                "Before responding, examine every factual sentence you are about to output.");
 
             resultBuilder.AppendLine(
-                "Remove any information that is not explicitly supported.");
+                "For each sentence, ask: Can this sentence be directly traced to the " +
+                "KNOWLEDGE BASE CONTENT without using outside knowledge or inference?");
+
+            resultBuilder.AppendLine(
+                "If the answer is NO, remove that sentence.");
+
+            resultBuilder.AppendLine(
+                "If a direct source statement exists, use the source statement instead " +
+                "of generating a paraphrased or expanded answer.");
+
+            resultBuilder.AppendLine(
+                "Pay particular attention to relationships between concepts. " +
+                "Do not state a relationship unless the knowledge base explicitly states it.");
 
             resultBuilder.AppendLine(
                 "Return only the final answer.");
@@ -264,53 +409,160 @@ public OllamaChatRequest CreateToolResultRequest(
                     Temperature = 0,
                     Seed = 42
                 }
-
             };
-     }       
-        public OllamaChatRequest CreateToolResultRequest1(
-     ChatRequest request,
-     IReadOnlyList<ToolResult> toolResults)
+        }
+
+
+
+
+    public OllamaChatRequest CreateEvidenceSelectionRequest(
+    ChatRequest request,
+    IReadOnlyList<EvidenceUnit> evidenceUnits,
+    string informationNeed)
         {
             var context = new PromptContext
             {
-                SearchResults = []
+                SearchResults = [],
+                IsRagMode = true
             };
 
             var messages =
-                _composer.Compose(request, context);
+                _composer.Compose(
+                    request,
+                    context);
+
+            Console.WriteLine(
+                $"Evidence Prompt Context IsRagMode: {context.IsRagMode}");
 
             var resultBuilder =
                 new StringBuilder();
 
-            // ==========================================
-            // GENERAL INSTRUCTION
-            // ==========================================
-
             resultBuilder.AppendLine(
-                "The requested tools have finished executing.");
+                "You are an evidence selector for a knowledge retrieval system.");
 
             resultBuilder.AppendLine();
 
             resultBuilder.AppendLine(
-                "Answer the user's original request using only the information " +
-                "contained in the tool results.");
+                "Your task is to identify the smallest set of evidence units " +
+                "that directly support each information need.");
 
             resultBuilder.AppendLine();
 
-            // ==========================================
-            // KNOWLEDGE BASE CONTENT
-            // ==========================================
-
             resultBuilder.AppendLine(
-                "KNOWLEDGE BASE CONTENT");
+                "STRICT EVIDENCE SELECTION RULES");
 
             resultBuilder.AppendLine(
                 "========================================");
 
-            foreach (var toolResult in toolResults)
+            resultBuilder.AppendLine(
+                "1. Select evidence ONLY from the provided EVIDENCE UNITS.");
+
+            resultBuilder.AppendLine(
+                "2. Do not use pretrained knowledge, outside information, " +
+                "assumptions, or common knowledge.");
+
+            resultBuilder.AppendLine(
+                "3. For each information need, examine the provided evidence units.");
+
+            resultBuilder.AppendLine(
+                "4. Select evidence ONLY when the evidence directly supports " +
+                "the specific information need.");
+
+            resultBuilder.AppendLine(
+                "5. A mere mention, keyword occurrence, list entry, title, " +
+                "skill listing, metadata value, or incidental reference to a " +
+                "subject does NOT constitute supporting evidence.");
+
+            resultBuilder.AppendLine(
+                "6. If the information need asks what something is, select evidence " +
+                "that actually states what it is or provides its defining information. " +
+                "Do not select evidence merely because it contains the subject name.");
+
+            resultBuilder.AppendLine(
+                "7. If the information need asks for a specific fact, property, " +
+                "behavior, relationship, comparison, cause, purpose, or other concept, " +
+                "the selected evidence must directly support that requested concept.");
+
+            resultBuilder.AppendLine(
+                "8. If no evidence unit directly supports the information need, " +
+                "return an empty evidence array.");
+
+            resultBuilder.AppendLine("SELECTION DECISION PROCEDURE");
+
+            resultBuilder.AppendLine(
+                "========================================");
+
+            resultBuilder.AppendLine(
+                "For each candidate evidence unit, ask: " +
+                "Does this evidence itself contain the information needed " +
+                "to satisfy the information need?");
+
+            resultBuilder.AppendLine(
+                "If YES, it is directly supporting evidence.");
+
+            resultBuilder.AppendLine(
+                "If the evidence only mentions the subject without providing " +
+                "the requested information, it is NOT supporting evidence.");
+
+            resultBuilder.AppendLine(
+                "When multiple evidence units directly support the need, " +
+                "select the smallest sufficient set.");
+
+            resultBuilder.AppendLine();
+
+            resultBuilder.AppendLine(
+                "9. Do not generate or explain the answer.");
+
+            resultBuilder.AppendLine(
+                "10. Preserve the original information need exactly.");
+
+            resultBuilder.AppendLine(
+                "11. Return evidence using ONLY the Result Index and Evidence " +
+                "Index provided in the EVIDENCE UNITS.");
+
+            resultBuilder.AppendLine(
+                "12. Never return the evidence text itself.");
+
+            resultBuilder.AppendLine(
+                "13. For informationNeed, copy the exact text of the corresponding " +
+                "information need from INFORMATION NEEDS.");
+
+            resultBuilder.AppendLine(
+                "14. Return exactly one answer object for the provided information need.");
+
+            resultBuilder.AppendLine(
+                "15. Do not omit the provided information need.");
+
+            resultBuilder.AppendLine();
+
+            resultBuilder.AppendLine(
+                "INFORMATION NEEDS");
+
+            resultBuilder.AppendLine(
+                "========================================");
+
+            resultBuilder.AppendLine(
+                $"1. {informationNeed}");
+
+            resultBuilder.AppendLine();
+
+            resultBuilder.AppendLine(
+                "EVIDENCE UNITS");
+
+            resultBuilder.AppendLine(
+                "========================================");
+
+            foreach (var group in evidenceUnits.GroupBy(e => e.ResultIndex))
             {
                 resultBuilder.AppendLine(
-                    ToolResultFormatter.Format(toolResult));
+                    $"[Result {group.Key}]");
+
+                foreach (var evidence in group)
+                {
+                    resultBuilder.AppendLine(
+                        $"[Evidence {evidence.EvidenceIndex}] " +
+                        evidence.Text);
+                }
 
                 resultBuilder.AppendLine();
             }
@@ -319,237 +571,238 @@ public OllamaChatRequest CreateToolResultRequest(
                 "========================================");
 
             resultBuilder.AppendLine(
-                "END OF KNOWLEDGE BASE CONTENT");
+                "END OF EVIDENCE UNITS");
 
             resultBuilder.AppendLine();
 
-            // ==========================================
-            // CURRENT USER REQUEST
-            // ==========================================
-
             resultBuilder.AppendLine(
-                "CURRENT USER REQUEST");
-
-            resultBuilder.AppendLine(
-                "----------------------------------------");
-
-            var latestUserMessage =
-                request.Messages.Last(m =>
-                    string.Equals(
-                        m.Role,
-                        "user",
-                        StringComparison.OrdinalIgnoreCase));
-
-            resultBuilder.AppendLine(
-                latestUserMessage.Content);
-
-            resultBuilder.AppendLine();
-
-            // ==========================================
-            // SOURCE RESTRICTION
-            // ==========================================
-
-            resultBuilder.AppendLine(
-                "SOURCE RESTRICTION");
+                "OUTPUT FORMAT");
 
             resultBuilder.AppendLine(
                 "========================================");
 
             resultBuilder.AppendLine(
-                "The KNOWLEDGE BASE CONTENT is the exclusive source of factual " +
-                "information for the answer.");
-
-            resultBuilder.AppendLine(
-                "Do not use pretrained knowledge, outside information, assumptions, " +
-                "or unstated background knowledge.");
-
-            resultBuilder.AppendLine(
-                "Every factual statement in the answer must be supported by " +
-                "information explicitly present in the KNOWLEDGE BASE CONTENT.");
-
-            resultBuilder.AppendLine(
-                "If a fact is not present in the KNOWLEDGE BASE CONTENT, treat that " +
-                "fact as unknown.");
+                "Return ONLY valid JSON.");
 
             resultBuilder.AppendLine();
 
-            // ==========================================
-            // FAITHFUL TRANSFORMATION
-            // ==========================================
-
             resultBuilder.AppendLine(
-                "FAITHFUL TRANSFORMATION");
-
-            resultBuilder.AppendLine(
-                "----------------------------------------");
-
-            resultBuilder.AppendLine(
-                "Treat the retrieved content as source material, not as a topic " +
-                "from which to generate additional knowledge.");
-
-            resultBuilder.AppendLine(
-                "Your task is to select, combine, rephrase, or summarize information " +
-                "that is already present in the source material.");
-
-            resultBuilder.AppendLine(
-                "Do not expand the source material with additional details.");
-
-            resultBuilder.AppendLine(
-                "Do not explain how something works unless the retrieved content " +
-                "explicitly explains how it works.");
-
-            resultBuilder.AppendLine(
-                "Do not describe properties, components, purposes, relationships, " +
-                "causes, effects, examples, procedures, or mechanisms unless they " +
-                "are explicitly stated in the retrieved content.");
-
-            resultBuilder.AppendLine(
-                "A short statement must remain short unless the additional detail " +
-                "is explicitly supported by the retrieved content.");
-
-            resultBuilder.AppendLine(
-                "A concept mentioned in the retrieved content does not authorize you " +
-                "to provide other information normally associated with that concept.");
+                "The \"answers\" array must contain exactly one object " +
+                "for the provided information need.");
 
             resultBuilder.AppendLine();
 
-            // ==========================================
-            // PARTIAL INFORMATION
-            // ==========================================
+            resultBuilder.AppendLine(
+                "For the provided information need:");
 
             resultBuilder.AppendLine(
-                "PARTIAL INFORMATION RULE");
+                "- \"informationNeed\" must contain the exact original " +
+                "information need.");
 
             resultBuilder.AppendLine(
-                "----------------------------------------");
+                "- \"evidence\" must contain only evidence references " +
+                "that directly support that information need.");
 
             resultBuilder.AppendLine(
-                "If the retrieved content answers only part of the user's request, " +
-                "provide only the supported information.");
+                "- \"resultIndex\" must be an actual Result Index " +
+                "from EVIDENCE UNITS.");
 
             resultBuilder.AppendLine(
-                "Do not fill missing information using your own knowledge.");
+                "- \"evidenceIndexes\" must contain only actual Evidence Index " +
+                "values from that result.");
 
             resultBuilder.AppendLine(
-                "If the retrieved content does not contain enough information to " +
-                "answer the request, state that the requested information was not " +
-                "found in the knowledge base.");
+                "- \"complete\" must be true only when the selected evidence " +
+                "supports the complete information need; otherwise it must be false.");
+
+            resultBuilder.AppendLine(
+                "- If no evidence directly supports an information need, " +
+                "return an empty \"evidence\" array.");
 
             resultBuilder.AppendLine();
 
-            // ==========================================
-            // NO RESULT RULE
-            // ==========================================
-
             resultBuilder.AppendLine(
-                "NO-RESULT RULE");
-
-            resultBuilder.AppendLine(
-                "----------------------------------------");
-
-            resultBuilder.AppendLine(
-                "If the tool results contain no relevant information, do not answer " +
-                "using your own knowledge.");
-
-            resultBuilder.AppendLine(
-                "Instead, state that the requested information was not found " +
-                "in the knowledge base.");
+                "Use this JSON structure:");
 
             resultBuilder.AppendLine();
 
-            // ==========================================
-            // ANSWER RULES
-            // ==========================================
+            resultBuilder.AppendLine("{");
 
             resultBuilder.AppendLine(
-                "ANSWER RULES");
+                "  \"answers\": [");
 
             resultBuilder.AppendLine(
-                "----------------------------------------");
+                "    {");
 
             resultBuilder.AppendLine(
-                "1. Answer the user's request directly.");
+                "      \"informationNeed\": \"<exact information need>\",");
 
             resultBuilder.AppendLine(
-                "2. Use only information explicitly supported by the retrieved content.");
+                "      \"evidence\": [");
 
             resultBuilder.AppendLine(
-                "3. Prefer concise answers when the retrieved content is limited.");
+                "        {");
 
             resultBuilder.AppendLine(
-                "4. Do not make the answer more detailed than the source material.");
+                "          \"resultIndex\": <actual result index>,");
 
             resultBuilder.AppendLine(
-                "5. Do not introduce new factual information.");
+                "          \"evidenceIndexes\": [<actual evidence index>]");
 
             resultBuilder.AppendLine(
-                "6. Do not infer missing information.");
+                "        }");
 
             resultBuilder.AppendLine(
-                "7. Do not mention tools, retrieval, grounding, validation, prompts, " +
-                "or internal processing.");
+                "      ],");
 
             resultBuilder.AppendLine(
-                "8. Do not output JSON.");
+                "      \"complete\": <true or false>");
 
             resultBuilder.AppendLine(
-                "9. Do not include role names.");
+                "    }");
 
             resultBuilder.AppendLine(
-                "10. Do not repeat the user's question.");
+                "  ]");
 
             resultBuilder.AppendLine(
-                "11. Start directly with the answer.");
+                "}");
 
             resultBuilder.AppendLine();
 
-            // ==========================================
-            // FINAL VERIFICATION
-            // ==========================================
+            resultBuilder.AppendLine(
+                "IMPORTANT");
 
             resultBuilder.AppendLine(
-                "FINAL VERIFICATION");
+                "========================================");
 
             resultBuilder.AppendLine(
-                "----------------------------------------");
+                "- The \"answers\" array MUST contain exactly one object.");
 
             resultBuilder.AppendLine(
-                "Before returning the answer, examine every factual statement.");
+                "- Process the provided information need.");
 
             resultBuilder.AppendLine(
-                "For each statement, verify that its information is explicitly " +
-                "supported by the KNOWLEDGE BASE CONTENT.");
+                "- Do not omit the provided information need.");
 
             resultBuilder.AppendLine(
-                "If a statement contains information that is not explicitly supported, " +
-                "remove that information.");
+                "- Replace all placeholders with actual values from " +
+                "the provided EVIDENCE UNITS.");
 
             resultBuilder.AppendLine(
-                "Do not replace removed information with information from your " +
-                "pretrained knowledge.");
+                "- Never invent result indexes.");
 
             resultBuilder.AppendLine(
-                "Return only the final grounded answer.");
+                "- Never invent evidence indexes.");
 
-            // ==========================================
-            // ADD SYSTEM MESSAGE
-            // ==========================================
+            resultBuilder.AppendLine(
+                "- Return ONLY valid JSON.");
 
-            messages.Add(new OllamaChatMessage
+            resultBuilder.AppendLine(
+                "- Do not return evidence text.");
+
+            resultBuilder.AppendLine(
+                "- Do not return explanations.");
+
+            resultBuilder.AppendLine(
+                "- Do not answer the information need.");
+
+            messages.Add(
+                new OllamaChatMessage
+                {
+                    Role = "system",
+                    Content = resultBuilder.ToString()
+                });
+
+            Console.WriteLine("========= EVIDENCE SELECTION PROMPT =========");
+
+            foreach (var message in messages)
             {
-                Role = "system",
-                Content = resultBuilder.ToString()
-            });
+                Console.WriteLine($"ROLE: {message.Role}");
+                Console.WriteLine(message.Content);
+                Console.WriteLine("---------------------------------------------");
+            }
 
-            // ==========================================
-            // CREATE OLLAMA REQUEST
-            // ==========================================
+            Console.WriteLine(
+                "=============================================");
 
             return new OllamaChatRequest
             {
                 Model = _options.ChatModel,
                 Stream = false,
                 Messages = messages,
+
+                Format = new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        answers = new
+                        {
+                            type = "array",
+                            minItems = 1,
+                            maxItems = 1,
+                            items = new
+                            {
+                                type = "object",
+                                properties = new
+                                {
+                                    informationNeed = new
+                                    {
+                                        type = "string"
+                                    },
+                                    evidence = new
+                                    {
+                                        type = "array",
+                                        minItems = 0,
+                                        items = new
+                                        {
+                                            type = "object",
+                                            properties = new
+                                            {
+                                                resultIndex = new
+                                                {
+                                                    type = "integer"
+                                                },
+                                                evidenceIndexes = new
+                                                {
+                                                    type = "array",
+                                                    minItems = 1,
+                                                    items = new
+                                                    {
+                                                        type = "integer"
+                                                    }
+                                                }
+                                            },
+                                            required = new[]
+                                            {
+                                                "resultIndex",
+                                                "evidenceIndexes"
+                                            },
+                                            additionalProperties = false
+                                        }
+                                    },
+                                    complete = new
+                                    {
+                                        type = "boolean"
+                                    }
+                                },
+                                required = new[]
+                                {
+                                    "informationNeed",
+                                    "evidence",
+                                    "complete"
+                                },
+                                additionalProperties = false
+                            }
+                        }
+                    },
+                    required = new[]
+                    {
+                        "answers"
+                    },
+                    additionalProperties = false
+                },
+
                 Options = new OllamaGenerationOptions
                 {
                     Temperature = 0,
@@ -557,5 +810,272 @@ public OllamaChatRequest CreateToolResultRequest(
                 }
             };
         }
+     public OllamaChatRequest CreateCorrectiveEvidenceSelectionRequest(
+     ChatRequest request,
+     IReadOnlyList<EvidenceUnit> evidenceUnits,
+     string informationNeed,
+     IReadOnlyList<EvidenceUnit> previouslySelectedEvidence)
+        {
+            var resultBuilder = new StringBuilder();
+
+            resultBuilder.AppendLine(
+                "You are a corrective evidence selector for a generic knowledge retrieval system.");
+
+            resultBuilder.AppendLine();
+
+            resultBuilder.AppendLine(
+                "Your task is to select additional evidence units that may complete " +
+                "an information need when the previously selected evidence was insufficient.");
+
+            resultBuilder.AppendLine();
+
+            resultBuilder.AppendLine(
+                "The information need may refer to ANY subject, domain, document, person, " +
+                "technology, process, product, organization, or other topic.");
+
+            resultBuilder.AppendLine();
+
+            resultBuilder.AppendLine(
+                "STRICT RULES");
+
+            resultBuilder.AppendLine(
+                "========================================");
+
+            resultBuilder.AppendLine(
+                "1. Use ONLY the evidence units provided below.");
+
+            resultBuilder.AppendLine(
+                "2. Do not use pretrained knowledge, outside information, assumptions, " +
+                "or common knowledge.");
+
+            resultBuilder.AppendLine(
+                "3. Preserve the original information need exactly.");
+
+            resultBuilder.AppendLine(
+                "4. Select evidence that provides missing information required to " +
+                "support the complete information need.");
+
+            resultBuilder.AppendLine(
+                "5. Prefer evidence that complements the previously selected evidence.");
+
+            resultBuilder.AppendLine(
+                "6. Do not select evidence merely because it mentions the same subject.");
+
+            resultBuilder.AppendLine(
+                "7. If the information need asks for a relationship, comparison, " +
+                "connection, dependency, interaction, or other multi-part concept, " +
+                "select evidence that supports the requested concept itself.");
+
+            resultBuilder.AppendLine(
+                "8. Do not remove previously selected evidence.");
+
+            resultBuilder.AppendLine(
+                "9. Do not invent evidence references.");
+
+            resultBuilder.AppendLine(
+                "10. Do not answer the information need.");
+
+            resultBuilder.AppendLine(
+                "11. Do not return evidence text.");
+
+            resultBuilder.AppendLine(
+                "12. Return only evidence references.");
+
+            resultBuilder.AppendLine(
+                "13. Select the smallest set of additional evidence needed.");
+
+            resultBuilder.AppendLine(
+                "14. If no additional evidence can improve completeness, " +
+                "return an empty evidence array.");
+
+            resultBuilder.AppendLine(
+                "15. The complete field must always be false. " +
+                "Completeness will be evaluated separately.");
+
+            resultBuilder.AppendLine();
+
+            resultBuilder.AppendLine(
+                "INFORMATION NEED");
+
+            resultBuilder.AppendLine(
+                "========================================");
+
+            resultBuilder.AppendLine(
+                informationNeed);
+
+            resultBuilder.AppendLine();
+
+            resultBuilder.AppendLine(
+                "PREVIOUSLY SELECTED EVIDENCE");
+
+            resultBuilder.AppendLine(
+                "========================================");
+
+            foreach (var evidence in previouslySelectedEvidence)
+            {
+                resultBuilder.AppendLine(
+                    $"[Result {evidence.ResultIndex}] " +
+                    $"[Evidence {evidence.EvidenceIndex}] " +
+                    $"{evidence.Text}");
+            }
+
+            resultBuilder.AppendLine();
+
+            resultBuilder.AppendLine(
+                "AVAILABLE EVIDENCE");
+
+            resultBuilder.AppendLine(
+                "========================================");
+
+            foreach (var evidence in evidenceUnits)
+            {
+                resultBuilder.AppendLine(
+                    $"[Result {evidence.ResultIndex}] " +
+                    $"[Evidence {evidence.EvidenceIndex}] " +
+                    $"{evidence.Text}");
+            }
+
+            resultBuilder.AppendLine();
+
+            resultBuilder.AppendLine(
+                "OUTPUT FORMAT");
+
+            resultBuilder.AppendLine(
+                "========================================");
+
+            resultBuilder.AppendLine(
+                """
+                    Return ONLY valid JSON using this structure:
+
+                    {
+                      "answers": [
+                        {
+                          "informationNeed": "<exact information need>",
+                          "evidence": [
+                            {
+                              "resultIndex": <actual result index>,
+                              "evidenceIndexes": [<actual evidence index>]
+                            }
+                          ],
+                          "complete": false
+                        }
+                      ]
+                    }
+
+                    IMPORTANT:
+                    - The "complete" field must always be false.
+                    - Do not use the "complete" field to decide whether the information need
+                      is complete.
+                    - Completeness will be evaluated separately after corrective evidence
+                      selection.
+                    - Your task is only to identify additional evidence that may fill
+                      missing information.
+                    """);
+
+            return new OllamaChatRequest
+            {
+                Model = _options.ChatModel,
+                Stream = false,
+
+                Messages =
+                [
+                    new OllamaChatMessage
+            {
+                Role = "system",
+                Content = resultBuilder.ToString()
+            }
+                ],
+
+                Format = new
+                {
+                    type = "object",
+
+                    properties = new
+                    {
+                        answers = new
+                        {
+                            type = "array",
+
+                            items = new
+                            {
+                                type = "object",
+
+                                properties = new
+                                {
+                                    informationNeed = new
+                                    {
+                                        type = "string"
+                                    },
+
+                                    evidence = new
+                                    {
+                                        type = "array",
+
+                                        items = new
+                                        {
+                                            type = "object",
+
+                                            properties = new
+                                            {
+                                                resultIndex = new
+                                                {
+                                                    type = "integer"
+                                                },
+
+                                                evidenceIndexes = new
+                                                {
+                                                    type = "array",
+
+                                                    items = new
+                                                    {
+                                                        type = "integer"
+                                                    }
+                                                }
+                                            },
+
+                                            required = new[]
+                                            {
+                                        "resultIndex",
+                                        "evidenceIndexes"
+                                    },
+
+                                            additionalProperties = false
+                                        }
+                                    },
+
+                                    complete = new
+                                    {
+                                        type = "boolean"
+                                    }
+                                },
+
+                                required = new[]
+                                {
+                            "informationNeed",
+                            "evidence",
+                            "complete"
+                        },
+
+                                additionalProperties = false
+                            }
+                        }
+                    },
+
+                    required = new[]
+                    {
+                "answers"
+            },
+
+                    additionalProperties = false
+                },
+
+                Options = new OllamaGenerationOptions
+                {
+                    Temperature = 0,
+                    Seed = 42
+                }
+            };
+        }
+
     }
 }

@@ -24,6 +24,12 @@ namespace AIChatAssistant.Interfaces
         string originalQuery,
         IReadOnlyList<SearchResult> candidates,
         int topK);
+        Task<List<SearchResult>> RetrieveCandidatesAsync(
+        IReadOnlyList<string> searchQueries,
+        SearchFilter? filter = null,
+        int topK = 10,
+        float similarityThreshold = 0.5f,
+        string queryType = "Unknown");
 
     }
 }

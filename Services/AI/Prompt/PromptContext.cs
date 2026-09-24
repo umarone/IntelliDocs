@@ -8,6 +8,7 @@ namespace AIChatAssistant.Services.AI.Prompt
     {
         public IReadOnlyList<SearchResult> SearchResults { get; init; } = [];
         public IReadOnlyList<ChatMessage> ConversationMessages { get; init; } = [];
+        public bool IsRagMode { get; init; }
 
         //public bool EnableTools { get; init; }
 

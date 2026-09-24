@@ -138,5 +138,10 @@ namespace AIChatAssistant.Services.Documents.VectorStores
                 })
                 .ToList();
         }
+
+        public Task DeleteAsync(Guid documentId)
+        {
+            throw new NotImplementedException();
+        }
     }
 }

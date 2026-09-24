@@ -1,4 +1,4 @@
-﻿using AIChatAssistant.Models.AI.Embeddings;
+﻿using AIChatAssistant.Models.Chat.Embeddings;
 
 namespace AIChatAssistant.Interfaces
 {
@@ -8,5 +8,8 @@ namespace AIChatAssistant.Interfaces
         EmbeddingRequest request);
         Task<float[]> GenerateEmbeddingAsync(
         string text);
+
+        Task<IReadOnlyList<float[]>> GenerateEmbeddingsAsync(
+        IReadOnlyList<string> texts);
     }
 }

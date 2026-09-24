@@ -1,5 +1,7 @@
 ﻿using AIChatAssistant.Common;
 using AIChatAssistant.Interfaces;
+using AIChatAssistant.Models.RAG;
+using System.Text.Json;
 
 namespace AIChatAssistant.Services.AI.Knowledge
 {
@@ -7,16 +9,20 @@ namespace AIChatAssistant.Services.AI.Knowledge
     {
         private readonly IChatCompletionService _chatCompletionService;
         private readonly IQueryComplexityAnalyzer _complexityAnalyzer;
+        private readonly IInformationNeedDetector _informationNeedDetector;
         public QueryDecomposer(
-            IChatCompletionService chatCompletionService, IQueryComplexityAnalyzer complexityAnalyzer)
+            IChatCompletionService chatCompletionService, 
+            IQueryComplexityAnalyzer complexityAnalyzer,
+            IInformationNeedDetector informationNeedDetector)
         {
             _chatCompletionService = chatCompletionService;
             _complexityAnalyzer = complexityAnalyzer;
+            _informationNeedDetector = informationNeedDetector;
         }
 
         public async Task<IReadOnlyList<string>> DecomposeAsync(
-            string question,
-            CancellationToken cancellationToken = default)
+     string question,
+     CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(question))
             {
@@ -27,55 +33,121 @@ namespace AIChatAssistant.Services.AI.Knowledge
             """
             You decompose user requests for a knowledge retrieval system.
 
-            Split the user's request only when it explicitly contains multiple
-            independent information needs.
+            Your task is ONLY to identify explicitly requested independent
+            information needs.
 
-            If there is only one information need, return the user's input unchanged.
+            RULES
 
-            If there are multiple information needs, return one concise query for
-            each explicitly requested information need.
+            1. If the request contains only one information need,
+               return the original user request unchanged as the only query.
 
-            Do not answer the user.
-            Do not explain.
-            Do not add information.
-            Do not invent information needs.
-            Do not generate related questions.
-            Do not rewrite a single-information request.
-            Do not output numbers, bullets, labels, or commentary.
+            2. If the request explicitly contains multiple independent
+               information needs, return one query for each information need.
 
-            Output only the queries, one per line.
+            3. Preserve the original meaning and requested scope.
+
+            4. Do not introduce new information.
+
+            5. Do not invent information needs.
+
+            6. Do not generate related questions.
+
+            7. Do not broaden the user's request.
+
+            8. Do not answer the user.
+
+            9. Do not explain anything.
+
+            10. Do not rewrite a single-information request.
+
+            Return ONLY valid JSON using this exact structure:
+
+            {
+              "queries": [
+                "query 1",
+                "query 2"
+              ]
+            }
+
             Maximum three queries.
             """;
 
-            var result =
-                await _chatCompletionService.CompleteAsync(
+            var response =
+                await _chatCompletionService.CompleteStructuredAsync(
                     systemPrompt,
                     question,
                     cancellationToken);
 
+            Console.WriteLine(
+                "========= QUERY DECOMPOSITION RESPONSE =========");
+
+            Console.WriteLine(response);
+
+            Console.WriteLine(
+                "=================================================");
+
+            QueryDecompositionResult? result;
+
+            try
+            {
+                result =
+                    JsonSerializer.Deserialize<QueryDecompositionResult>(
+                        response,
+                        new JsonSerializerOptions
+                        {
+                            PropertyNameCaseInsensitive = true
+                        });
+            }
+            catch (JsonException ex)
+            {
+                Console.WriteLine(
+                    $"Query decomposition JSON error: {ex.Message}");
+
+                return [question];
+            }
+
+            if (result is null ||
+                result.Queries is null ||
+                result.Queries.Count == 0)
+            {
+                Console.WriteLine(
+                    "Query decomposition returned no queries.");
+
+                return [question];
+            }
+
             var queries =
-                result
-                    .Split(
-                        '\n',
-                        StringSplitOptions.RemoveEmptyEntries |
-                        StringSplitOptions.TrimEntries)
-                    .Select(x => x.Trim())
-                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                result.Queries
+                    .Where(q => !string.IsNullOrWhiteSpace(q))
+                    .Select(q => q.Trim())
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .Take(3)
                     .ToList();
 
-            return queries.Count > 0
-                ? queries
-                : [question];
+            if (queries.Count == 0)
+            {
+                return [question];
+            }
+
+            return queries;
         }
-        public async Task<IReadOnlyList<string>> DecomposeIfNeededAsync(
-    string question,
-    CancellationToken cancellationToken = default)
+        public async Task<
+    (IReadOnlyList<string> InformationNeeds,
+     QueryComplexityResult ComplexityAnalysis)>
+    DecomposeIfNeededAsync(
+        string question,
+        CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(question))
             {
-                return [];
+                return (
+                    [],
+                    new QueryComplexityResult
+                    {
+                        Complexity = QueryComplexity.Normal,
+                        Score = 0.5,
+                        Reason = "Question was empty or invalid."
+                    });
             }
 
             var analysis =
@@ -96,26 +168,54 @@ namespace AIChatAssistant.Services.AI.Knowledge
             Console.WriteLine(
                 $"Reason: {analysis.Reason}");
 
-            if (analysis.Complexity == QueryComplexity.Simple)
+            // Simple questions are still passed through the
+            // information-need detector because complexity and
+            // number of information needs are separate concerns.
+
+            var informationNeeds =
+                await _informationNeedDetector.DetectAsync(
+                    question,
+                    cancellationToken);
+
+            Console.WriteLine(
+                $"Detected count: {informationNeeds.InformationNeeds.Count}");
+
+            Console.WriteLine(
+                $"HasMultipleNeeds: {informationNeeds.HasMultipleNeeds}");
+
+            Console.WriteLine(
+                $"Reason: {informationNeeds.Reason}");
+
+            Console.WriteLine(
+                "Information needs detected:");
+
+            foreach (var need in informationNeeds.InformationNeeds)
             {
                 Console.WriteLine(
-                    "Decomposition skipped: simple query.");
+                    $"- {need}");
+            }
+
+            if (!informationNeeds.HasMultipleNeeds)
+            {
+                Console.WriteLine(
+                    "Decomposition skipped: only one information need.");
 
                 Console.WriteLine(
                     "=================================================");
 
-                return [question];
+                return (new List<string> { question }, analysis);
             }
 
             Console.WriteLine(
-                "Decomposition required.");
+                $"Multiple information needs detected: " +
+                $"{informationNeeds.InformationNeeds.Count}");
 
             Console.WriteLine(
                 "=================================================");
 
-            return await DecomposeAsync(
-                question,
-                cancellationToken);
+            return (
+                informationNeeds.InformationNeeds,
+                analysis);
         }
     }
 }

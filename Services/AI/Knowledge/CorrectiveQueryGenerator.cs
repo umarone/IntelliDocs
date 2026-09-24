@@ -21,7 +21,14 @@ namespace AIChatAssistant.Services.AI.Knowledge
             {
                 return string.Empty;
             }
+            if (string.Equals(validationReason?.Trim(), "No retrieved context was available.",StringComparison.OrdinalIgnoreCase))
+            {
+                Console.WriteLine(
+                    "Corrective query generation skipped: " +
+                    "no retrieval context was available.");
 
+                return question.Trim();
+            }
             const string systemPrompt =
             """
             You are a corrective search query generator for an enterprise

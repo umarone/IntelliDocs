@@ -1,5 +1,6 @@
 ﻿using AIChatAssistant.Interfaces;
 using AIChatAssistant.Models.AI.Search;
+using System.Text.RegularExpressions;
 
 namespace AIChatAssistant.Services.AI.RAGPipeline
 {
@@ -41,25 +42,29 @@ namespace AIChatAssistant.Services.AI.RAGPipeline
             "use"
     };
         public Task<List<SearchResult>> RerankAsync(
-         string question,
-         IReadOnlyList<SearchResult> candidates,
-         int topK)
+      string question,
+      IReadOnlyList<SearchResult> candidates,
+      int topK)
         {
-            var keywords = question.ToLowerInvariant()
-                        .Split(
-                            ' ',
-                            StringSplitOptions.RemoveEmptyEntries |
-                            StringSplitOptions.TrimEntries)
-                        .Select(word =>
-                            word.Trim(
-                                '.', ',', '!', '?', ':', ';',
-                                '"', '\'', '(', ')', '[', ']',
-                                '{', '}', '<', '>', '/'))
-                        .Where(word =>
-                            !string.IsNullOrWhiteSpace(word) &&
-                            !StopWords.Contains(word))
-                        .Distinct()
-                        .ToList();
+            var keywords =
+                question.ToLowerInvariant()
+                    .Split(
+                        ' ',
+                        StringSplitOptions.RemoveEmptyEntries |
+                        StringSplitOptions.TrimEntries)
+                    .Select(word =>
+                        word.Trim(
+                            '.', ',', '!', '?', ':', ';',
+                            '"', '\'', '(', ')', '[', ']',
+                            '{', '}', '<', '>', '/'))
+                    .Where(word =>
+                        !string.IsNullOrWhiteSpace(word) &&
+                        !StopWords.Contains(word))
+                    .Distinct()
+                    .ToList();
+
+            const float semanticWeight = 0.7f;
+            const float keywordWeight = 0.3f;
 
             var reranked = candidates
                 .Select(result =>
@@ -69,10 +74,25 @@ namespace AIChatAssistant.Services.AI.RAGPipeline
                             result.Record.Content,
                             keywords);
 
+                    var semanticScore =
+                        Math.Clamp(
+                            result.Similarity,
+                            0f,
+                            1f);
+
+                    var combinedScore =
+                        (semanticScore * semanticWeight) +
+                        (keywordScore * keywordWeight);
+
+                    Console.WriteLine(
+                        $"Semantic={semanticScore:F3}, " +
+                        $"Keyword={keywordScore:F3}, " +
+                        $"Combined={combinedScore:F3}");
+
                     return new
                     {
                         Result = result,
-                        Score = keywordScore
+                        Score = combinedScore
                     };
                 })
                 .OrderByDescending(x => x.Score)
@@ -95,30 +115,73 @@ namespace AIChatAssistant.Services.AI.RAGPipeline
             if (string.IsNullOrWhiteSpace(content) ||
                 keywords.Count == 0)
             {
-                return 0;
+                return 0f;
             }
 
             var contentWords =
-                content
-                    .ToLowerInvariant()
-                    .Split(
-                        ' ',
-                        StringSplitOptions.RemoveEmptyEntries |
-                        StringSplitOptions.TrimEntries)
-                    .Select(word =>
-                        word.Trim(
-                            '.', ',', '!', '?', ':', ';',
-                            '"', '\'', '(', ')', '[', ']',
-                            '{', '}', '<', '>', '/'))
-                    .Where(word =>
-                        !string.IsNullOrWhiteSpace(word))
-                    .ToHashSet();
+                Regex.Split(
+                    content.ToLowerInvariant(),
+                    @"\s+")
+                .Select(word =>
+                    word.Trim(
+                        '.', ',', '!', '?', ':', ';',
+                        '"', '\'', '(', ')', '[', ']',
+                        '{', '}', '<', '>', '/'))
+                .Where(word =>
+                    !string.IsNullOrWhiteSpace(word))
+                .ToList();
+
+            if (contentWords.Count == 0)
+            {
+                return 0f;
+            }
+
+            var contentWordSet =
+                contentWords.ToHashSet(
+                    StringComparer.OrdinalIgnoreCase);
 
             var matchedKeywords =
                 keywords.Count(keyword =>
-                    contentWords.Contains(keyword));
+                    contentWordSet.Contains(keyword));
 
-            return (float)matchedKeywords / keywords.Count;
+            var coverageScore =
+                (float)matchedKeywords / keywords.Count;
+
+            var keywordOccurrences =
+                keywords.Sum(keyword =>
+                    contentWords.Count(word =>
+                        string.Equals(
+                            word,
+                            keyword,
+                            StringComparison.OrdinalIgnoreCase)));
+
+            var keywordDensity =
+                (float)keywordOccurrences /
+                contentWords.Count;
+
+            // Density is useful for distinguishing
+            // focused content from large documents where
+            // the keyword appears only incidentally.
+            var densityScore =
+                Math.Clamp(
+                    keywordDensity * 10f,
+                    0f,
+                    1f);
+
+            var score =
+                (coverageScore * 0.7f) +
+                (densityScore * 0.3f);
+
+            Console.WriteLine(
+                $"Keyword coverage: {coverageScore:F3}, " +
+                $"Density: {densityScore:F3}, " +
+                $"Keyword score: {score:F3}");
+
+            Console.WriteLine(
+                $"Content words: {contentWords.Count}, " +
+                $"Keyword occurrences: {keywordOccurrences}");
+
+            return score;
         }
         private static float CalculateKeywordScore1(
         string content,

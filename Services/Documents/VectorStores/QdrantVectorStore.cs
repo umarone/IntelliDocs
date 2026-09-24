@@ -71,7 +71,7 @@ namespace AIChatAssistant.Services.Documents.VectorStores
                     Key = "documentId",
                     Match = new QdrantMatch
                     {
-                        Value = documentId
+                        Value = documentId.ToString()
                     }
                 },
 
@@ -109,10 +109,17 @@ namespace AIChatAssistant.Services.Documents.VectorStores
             if (result?.Result?.Points == null)
                 return [];
 
-            return result.Result.Points
-                .Select(MapToVectorRecord)
-                .OrderBy(x => x.ChunkIndex)
-                .ToList();
+            var chunks = result.Result.Points
+            .Select(MapToVectorRecord)
+            .OrderBy(x => x.ChunkIndex)
+            .ToList();
+
+            return chunks;
+
+            //return result.Result.Points
+            //    .Select(MapToVectorRecord)
+            //    .OrderBy(x => x.ChunkIndex)
+            //    .ToList();
         }
 
         public async Task<List<SearchResult>> SearchAsync(
@@ -129,7 +136,9 @@ namespace AIChatAssistant.Services.Documents.VectorStores
 
                 WithPayload = true,
 
-                WithVector = true
+                WithVector = true,
+
+                Filter = MapFilter(filter),
             };
 
             var url =
@@ -160,6 +169,8 @@ namespace AIChatAssistant.Services.Documents.VectorStores
                      }),
 
                      Similarity = point.Score
+
+
                  })
              .ToList();
 
@@ -191,6 +202,74 @@ namespace AIChatAssistant.Services.Documents.VectorStores
             //return new List<SearchResult>();
 
         }
+        public async Task EnsureCollectionAsync()
+        {
+            try
+            {
+                var collectionUrl =
+                    $"{_options.BaseUrl}/collections/{_options.CollectionName}";
+
+                var getResponse =
+                    await _httpClient.GetAsync(collectionUrl);
+
+                if (!getResponse.IsSuccessStatusCode)
+                {
+                    if (getResponse.StatusCode !=
+                        System.Net.HttpStatusCode.NotFound)
+                    {
+                        getResponse.EnsureSuccessStatusCode();
+                    }
+
+                    var createRequest = new
+                    {
+                        vectors = new
+                        {
+                            size = 768,
+                            distance = "Cosine"
+                        }
+                    };
+
+                    var createResponse =
+                        await _httpClient.PutAsJsonAsync(
+                            collectionUrl,
+                            createRequest,
+                            QdrantJsonOptions);
+
+                    createResponse.EnsureSuccessStatusCode();
+                }
+
+                await EnsurePayloadIndexAsync("documentId");
+                await EnsurePayloadIndexAsync("fileName");
+            }
+            catch (HttpRequestException ex)
+            {
+                throw new InvalidOperationException(
+                    $"Unable to connect to Qdrant at '{_options.BaseUrl}'. " +
+                    "Make sure Qdrant is running and accessible.",
+                    ex);
+            }
+        }
+        private async Task EnsurePayloadIndexAsync(
+    string fieldName)
+        {
+            var url =
+                $"{_options.BaseUrl}/collections/" +
+                $"{_options.CollectionName}/index";
+
+            var request = new QdrantPayloadIndexRequest
+            {
+                FieldName = fieldName,
+                FieldSchema = "keyword"
+            };
+
+            var response =
+                await _httpClient.PutAsJsonAsync(
+                    url,
+                    request,
+                    QdrantJsonOptions);
+
+            response.EnsureSuccessStatusCode();
+        }
         private static QdrantFilter? MapFilter(SearchFilter? filter)
         {
             if (filter == null)
@@ -205,7 +284,7 @@ namespace AIChatAssistant.Services.Documents.VectorStores
                     Key = "documentId",
                     Match = new QdrantMatch
                     {
-                        Value = filter.DocumentId.Value
+                        Value = filter.DocumentId.Value.ToString()
                     }
                 });
             }
@@ -230,6 +309,34 @@ namespace AIChatAssistant.Services.Documents.VectorStores
                     Match = new QdrantMatch
                     {
                         Value = filter.ContentType
+                    }
+                });
+            }
+
+            if (filter.UploadedFrom.HasValue)
+            {
+                conditions.Add(new QdrantCondition
+                {
+                    Key = "uploadedAt",
+                    Range = new QdrantRange
+                    {
+                        Gte = new DateTimeOffset(
+                            filter.UploadedFrom.Value)
+                            .ToUnixTimeSeconds()
+                    }
+                });
+            }
+
+            if (filter.UploadedTo.HasValue)
+            {
+                conditions.Add(new QdrantCondition
+                {
+                    Key = "uploadedAt",
+                    Range = new QdrantRange
+                    {
+                        Lte = new DateTimeOffset(
+                            filter.UploadedTo.Value)
+                            .ToUnixTimeSeconds()
                     }
                 });
             }
@@ -267,6 +374,51 @@ namespace AIChatAssistant.Services.Documents.VectorStores
 
                 UploadedAt = point.Payload.UploadedAt
             };
+        }
+
+        public async Task DeleteAsync(Guid documentId)
+        {
+            var documentIdValue = documentId.ToString();
+                    
+
+            var url =
+                $"{_options.BaseUrl}/collections/" +
+                $"{_options.CollectionName}/points/delete";
+
+            var request = new
+            {
+                filter = new QdrantFilter
+                {
+                    Must =
+                    [
+                        new QdrantCondition
+                        {
+                            Key = "documentId",
+                            Match = new QdrantMatch
+                            {
+                                Value = documentIdValue
+                            }
+                        }
+                    ]
+                }
+            };
+
+            Console.WriteLine(
+                $"Qdrant Delete DocumentId: {documentIdValue}");
+
+            var response =
+                await _httpClient.PostAsJsonAsync(
+                    url,
+                    request,
+                    QdrantJsonOptions);
+
+            var responseBody =
+                await response.Content.ReadAsStringAsync();
+
+            Console.WriteLine(
+                $"Qdrant Delete Response: {responseBody}");
+
+            response.EnsureSuccessStatusCode();
         }
     }
 }

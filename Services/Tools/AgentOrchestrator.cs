@@ -7,12 +7,18 @@ using AIChatAssistant.Models.Agent;
 using AIChatAssistant.Models.AI.Search;
 using AIChatAssistant.Models.Chat;
 using AIChatAssistant.Models.Ollama;
+using AIChatAssistant.Models.RAG;
 using AIChatAssistant.Models.Tools;
 using AIChatAssistant.Models.Validators;
+using AIChatAssistant.Services.AI.Knowledge;
 using AIChatAssistant.Services.AI.Ollama;
+using Azure;
 using Azure.Core;
 using Microsoft.Extensions.Options;
+using System;
 using System.Diagnostics;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace AIChatAssistant.Services.Tools
 {
@@ -37,6 +43,8 @@ namespace AIChatAssistant.Services.Tools
         private readonly RagOptions _ragOptions;
         private readonly IGroundingValidator _groundingValidator;
         private readonly IKnowledgeRetriever _knowledgeRetriever;
+        private readonly IEvidenceCompletenessValidator _evidenceCompletenessValidator;
+        private readonly IQueryDecomposer _queryDecomposer;
         public AgentOrchestrator(
             IToolExecutor executor,
             IOllamaPromptBuilder promptBuilder,
@@ -45,7 +53,9 @@ namespace AIChatAssistant.Services.Tools
             IEnumerable<ITool> tools,
             IOptions<RagOptions> ragOptions,
             IGroundingValidator groundingValidator,
-            IKnowledgeRetriever knowledgeRetriever)
+            IKnowledgeRetriever knowledgeRetriever,
+            IEvidenceCompletenessValidator evidenceCompletenessValidator,
+            IQueryDecomposer queryDecomposer)
         {
             _executor = executor;
             _promptBuilder = promptBuilder;
@@ -55,6 +65,8 @@ namespace AIChatAssistant.Services.Tools
             _ragOptions = ragOptions.Value;
             _groundingValidator = groundingValidator;
             _knowledgeRetriever = knowledgeRetriever;
+            _evidenceCompletenessValidator = evidenceCompletenessValidator;
+            _queryDecomposer = queryDecomposer;
         }
 
         public async Task<AgentResult> RunAsync(
@@ -98,7 +110,7 @@ namespace AIChatAssistant.Services.Tools
             var toolResults =
                 new List<ToolResult>
                 {
-            toolResult
+                  toolResult
                 };
 
             Console.WriteLine(
@@ -139,7 +151,8 @@ namespace AIChatAssistant.Services.Tools
             var finalRequest =
                 _promptBuilder.CreateToolResultRequest(
                     request,
-                    toolResults);
+                    toolResults,
+                    []);
 
             var finalResponse =
                 await _ollamaClient.SendAsync(
@@ -162,7 +175,7 @@ namespace AIChatAssistant.Services.Tools
                 await ValidateGroundingAsync(
                     request,
                     finalResponse,
-                    searchResults);
+                    []);
 
             if (!groundingResult.Grounded)
             {
@@ -175,134 +188,754 @@ namespace AIChatAssistant.Services.Tools
                 finalResponse,
                 searchResults);
         }
-
 
         public async Task<AgentResult> RunDocumentRagAsync(
-    ChatRequest request,
-    OllamaChatRequest initialRequest)
-        {
-            var latestUserMessage =
-                request.Messages.LastOrDefault(
-                    m => string.Equals(
-                        m.Role,
-                        "user",
-                        StringComparison.OrdinalIgnoreCase));
-
-            if (latestUserMessage is null ||
-                string.IsNullOrWhiteSpace(latestUserMessage.Content))
+        ChatRequest request,
+        OllamaChatRequest initialRequest)
             {
-                return CreateAgentResult(
-                    CreateResponse(
-                        "I couldn't process the request because no user question was provided."),
-                    []);
-            }
+                var latestUserMessage =
+                    request.Messages.LastOrDefault(
+                        m => string.Equals(
+                            m.Role,
+                            "user",
+                            StringComparison.OrdinalIgnoreCase));
 
-            Console.WriteLine(
-                "========= DIRECT DOCUMENT RAG =========");
-
-            Console.WriteLine(
-                $"Question: {latestUserMessage.Content}");
-
-            // ==========================================
-            // STEP 1: DIRECT KNOWLEDGE RETRIEVAL
-            // ==========================================
-
-            var searchResults =
-                await _knowledgeRetriever.RetrieveAsync(
-                    latestUserMessage.Content,
-                    latestUserMessage.Content,
-                    request.Filter);
-
-            Console.WriteLine(
-                $"Retrieved results: {searchResults.Count}");
-
-            // ==========================================
-            // STEP 2: VALIDATE RETRIEVED EVIDENCE
-            // ==========================================
-
-            var evidenceResult =
-                ValidateEvidence(searchResults);
-
-            if (evidenceResult is not null)
-            {
-                return CreateAgentResult(
-                    evidenceResult,
-                    searchResults);
-            }
-
-            // ==========================================
-            // STEP 3: CREATE TOOL-RESULT SHAPE
-            // ==========================================
-
-            var toolResult =
-                new ToolResult
+                if (latestUserMessage is null ||
+                    string.IsNullOrWhiteSpace(latestUserMessage.Content))
                 {
-                    ToolName = KnowledgeSearchToolName,
-                    Success = true,
+                    return CreateAgentResult(
+                        CreateResponse("I couldn't process the request because no user question was provided."),[]);
+                }
 
-                    Data = string.Join(
-                        Environment.NewLine,
-                        searchResults.Select(result =>
-                            $"Similarity: {result.Similarity:F2}" +
-                            Environment.NewLine +
-                            result.Record.Content)),
+                Console.WriteLine(
+                    "========= DIRECT DOCUMENT RAG =========");
 
-                    Metadata = new Dictionary<string, object>
+                Console.WriteLine(
+                    $"Question: {latestUserMessage.Content}");
+
+                // ==========================================
+                // STEP 1: DIRECT KNOWLEDGE RETRIEVAL
+                // ==========================================
+
+                var decomposition = await _queryDecomposer.DecomposeIfNeededAsync(latestUserMessage.Content);
+
+                var informations =
+                    decomposition.InformationNeeds;
+
+                var complexityAnalysis =
+                    decomposition.ComplexityAnalysis;
+                Console.WriteLine(
+                    "========= INFORMATION NEEDS =========");
+
+                foreach (var informationNeed in informations)
+                {
+                    Console.WriteLine(
+                        $"Information Need: {informationNeed}");
+                }
+
+                Console.WriteLine(
+                    "=====================================");
+
+                var retrievalResult =
+                    await _knowledgeRetriever.RetrieveAsync(
+                        latestUserMessage.Content,
+                        latestUserMessage.Content,
+                        request.Filter,
+                        informations,
+                        complexityAnalysis);
+
+                var searchResults = retrievalResult.Results;
+
+                Console.WriteLine(
+                    $"Retrieved results: {searchResults.Count}");
+
+                // ==========================================
+                // STEP 2: VALIDATE RETRIEVED EVIDENCE
+                // ==========================================
+
+                var evidenceResult =
+                    ValidateEvidence(searchResults);
+
+                if (evidenceResult is not null)
+                {
+                    return CreateAgentResult(
+                        evidenceResult,
+                        searchResults);
+                }
+
+                // ==========================================
+                // STEP 3: BUILD EVIDENCE UNITS
+                // ==========================================
+
+                var evidenceUnits =
+                    BuildEvidenceUnits(searchResults);
+
+            // ==========================================
+            // STEP 4: INITIAL EVIDENCE SELECTION
+            // ==========================================
+            // Later to unblock
+            //var evidenceTasks =
+            //    informations.Select(
+            //        async informationNeed =>
+            //        {
+
+            //            Console.WriteLine($"========= CURRENT INFORMATION NEED: [{informationNeed}] =========");
+            //            var evidenceRequest =
+            //                _promptBuilder.CreateEvidenceSelectionRequest(
+            //                    request,
+            //                    evidenceUnits,
+            //                    informationNeed);
+
+            //            var evidenceResponse =
+            //                await _ollamaClient.SendAsync(
+            //                    evidenceRequest);
+            //            // TEMPORARY DEBUG
+            //            Console.WriteLine(
+            //                "========= RAW EVIDENCE SELECTION RESPONSE =========");
+
+            //            Console.WriteLine(evidenceResponse.Message.Content);
+
+            //            Console.WriteLine(
+            //                "====================================================");
+
+            //            return JsonSerializer.Deserialize<EvidenceSelectionResult>(
+            //                evidenceResponse.Message.Content);
+            //        });
+
+            //var evidenceSelections =
+            //    await Task.WhenAll(evidenceTasks);
+
+            //
+            var evidenceSelections = new List<EvidenceSelectionResult?>();
+
+            foreach (var informationNeed in informations)
+            {
+                Console.WriteLine(
+                    $"========= CURRENT INFORMATION NEED: [{informationNeed}] =========");
+
+                var evidenceRequest =
+                    _promptBuilder.CreateEvidenceSelectionRequest(
+                        request,
+                        evidenceUnits,
+                        informationNeed);
+
+                Console.WriteLine("========= FULL EVIDENCE SELECTION REQUEST =========");
+
+                Console.WriteLine(
+                    JsonSerializer.Serialize(
+                        evidenceRequest,
+                        new JsonSerializerOptions
+                        {
+                            WriteIndented = true
+                        }));
+
+                Console.WriteLine(
+                    "===================================================");
+
+
+                var evidenceResponse =
+                    await _ollamaClient.SendAsync(
+                        evidenceRequest);
+
+                Console.WriteLine(
+                    "========= RAW EVIDENCE SELECTION RESPONSE =========");
+
+                Console.WriteLine(evidenceResponse.Message.Content);
+
+                Console.WriteLine(
+                    "====================================================");
+
+                var selection =
+                    JsonSerializer.Deserialize<EvidenceSelectionResult>(
+                        evidenceResponse.Message.Content);
+
+                evidenceSelections.Add(selection);
+            }
+            var combinedEvidenceSelection =
+                    new EvidenceSelectionResult
                     {
-                        ["SearchResults"] = searchResults
+                        Answers = []
+                    };
+
+                foreach (var evidenceSelection in evidenceSelections)
+                {
+                    if (evidenceSelection?.Answers is not null)
+                    {
+                        combinedEvidenceSelection.Answers.AddRange(
+                            evidenceSelection.Answers);
                     }
-                };
+                }
 
-            // ==========================================
-            // STEP 4: BUILD FINAL ANSWER REQUEST
-            // ==========================================
+                var hasCompleteCoverage =
+                    HasCompleteEvidenceCoverage(
+                        combinedEvidenceSelection,
+                        informations,
+                        evidenceUnits);
 
-            var finalRequest =
-                _promptBuilder.CreateToolResultRequest(
-                    request,
-                    [toolResult]);
+                Console.WriteLine(
+                    $"Evidence coverage complete: {hasCompleteCoverage}");
 
-            // ==========================================
-            // STEP 5: GENERATE FINAL ANSWER
-            // ==========================================
+                if (!hasCompleteCoverage)
+                {
+                    return CreateAgentResult(
+                        CreateResponse(
+                            "I couldn't find sufficient evidence to answer all parts of your question."),
+                        searchResults);
+                }
 
-            var finalResponse =
-                await _ollamaClient.SendAsync(
-                    finalRequest);
+                // ==========================================
+                // STEP 4A: INITIAL EVIDENCE COMPLETENESS
+                // ==========================================
 
-            Console.WriteLine(
-                "========= FINAL LLM RESPONSE =========");
+                Console.WriteLine(
+                    "========= EVIDENCE COMPLETENESS VALIDATION =========");
 
-            Console.WriteLine(
-                finalResponse.Message.Content);
+                var allEvidenceComplete = true;
 
-            Console.WriteLine(
-                "======================================");
+                foreach (var informationNeed in informations)
+                {
+                    var evidenceAnswer =
+                        combinedEvidenceSelection.Answers
+                            .FirstOrDefault(
+                                x => string.Equals(
+                                    x.InformationNeed.Trim(),
+                                    informationNeed.Trim(),
+                                    StringComparison.OrdinalIgnoreCase));
 
-            // ==========================================
-            // STEP 6: VALIDATE GROUNDING
-            // ==========================================
+                    if (evidenceAnswer is null)
+                    {
+                        Console.WriteLine(
+                            $"Information Need: {informationNeed}");
 
-            var groundingResult =
-                await ValidateGroundingAsync(
-                    request,
+                        Console.WriteLine(
+                            "Validated Complete: False");
+
+                        Console.WriteLine(
+                            "Reason: No evidence-selection answer found.");
+
+                        allEvidenceComplete = false;
+
+                        continue;
+                    }
+
+                    var selectedEvidenceUnits =
+                        new List<EvidenceUnit>();
+
+                    foreach (var reference in evidenceAnswer.Evidence)
+                    {
+                        foreach (var evidenceIndex in reference.EvidenceIndexes)
+                        {
+                            var evidence =
+                                evidenceUnits.FirstOrDefault(
+                                    e =>
+                                        e.ResultIndex ==
+                                            reference.ResultIndex &&
+                                        e.EvidenceIndex ==
+                                            evidenceIndex);
+
+                            if (evidence is not null &&
+                                !string.IsNullOrWhiteSpace(evidence.Text))
+                            {
+                                selectedEvidenceUnits.Add(evidence);
+                            }
+                        }
+                    }
+
+                    var completenessResult =
+                        await _evidenceCompletenessValidator.ValidateAsync(
+                            informationNeed,
+                            selectedEvidenceUnits);
+
+                    Console.WriteLine(
+                        $"Information Need: {informationNeed}");
+
+                    Console.WriteLine(
+                        $"LLM Complete Flag: {evidenceAnswer.Complete}");
+
+                    Console.WriteLine(
+                        $"Validated Complete: {completenessResult.Complete}");
+
+                    Console.WriteLine(
+                        $"Reason: {completenessResult.Reason}");
+
+                    if (!completenessResult.Complete)
+                    {
+                        allEvidenceComplete = false;
+                    }
+                }
+
+                Console.WriteLine(
+                    $"All Evidence Complete: {allEvidenceComplete}");
+
+                Console.WriteLine(
+                    "===================================================");
+
+                // ==========================================
+                // STEP 4B: CORRECTIVE EVIDENCE SELECTION
+                // ==========================================
+
+                if (!allEvidenceComplete)
+                {
+                    Console.WriteLine(
+                        "========= CORRECTIVE EVIDENCE SELECTION =========");
+
+                    var correctiveEvidenceSelections =
+                        new List<EvidenceSelectionResult>();
+
+                    foreach (var informationNeed in informations)
+                    {
+                        var evidenceAnswer =
+                            combinedEvidenceSelection.Answers
+                                .FirstOrDefault(
+                                    x => string.Equals(
+                                        x.InformationNeed.Trim(),
+                                        informationNeed.Trim(),
+                                        StringComparison.OrdinalIgnoreCase));
+
+                        if (evidenceAnswer is null)
+                        {
+                            continue;
+                        }
+
+                        var previouslySelectedEvidence =
+                            new List<EvidenceUnit>();
+
+                        foreach (var reference in evidenceAnswer.Evidence)
+                        {
+                            foreach (var evidenceIndex in reference.EvidenceIndexes)
+                            {
+                                var evidence =
+                                    evidenceUnits.FirstOrDefault(
+                                        e =>
+                                            e.ResultIndex ==
+                                                reference.ResultIndex &&
+                                            e.EvidenceIndex ==
+                                                evidenceIndex);
+
+                                if (evidence is not null)
+                                {
+                                    previouslySelectedEvidence.Add(
+                                        evidence);
+                                }
+                            }
+                        }
+
+                        var correctiveRequest =
+                            _promptBuilder.CreateCorrectiveEvidenceSelectionRequest(
+                                request,
+                                evidenceUnits,
+                                informationNeed,
+                                previouslySelectedEvidence);
+
+                        var correctiveResponse =
+                            await _ollamaClient.SendAsync(
+                                correctiveRequest);
+
+                        Console.WriteLine(
+                            "========= CORRECTIVE EVIDENCE RAW RESPONSE =========");
+
+                        Console.WriteLine(
+                            correctiveResponse.Message.Content);
+
+                        Console.WriteLine(
+                            "=====================================================");
+
+                        var correctiveSelection =
+                            JsonSerializer.Deserialize<EvidenceSelectionResult>(
+                                correctiveResponse.Message.Content);
+
+                        if (correctiveSelection is not null)
+                        {
+                            correctiveEvidenceSelections.Add(
+                                correctiveSelection);
+                        }
+                    }
+
+                    Console.WriteLine(
+                        "========= MERGING CORRECTIVE EVIDENCE =========");
+
+                    foreach (var correctiveSelection in
+                             correctiveEvidenceSelections)
+                    {
+                        foreach (var correctiveAnswer in
+                                 correctiveSelection.Answers)
+                        {
+                            var originalAnswer =
+                                combinedEvidenceSelection.Answers
+                                    .FirstOrDefault(
+                                        x => string.Equals(
+                                            x.InformationNeed.Trim(),
+                                            correctiveAnswer.InformationNeed.Trim(),
+                                            StringComparison.OrdinalIgnoreCase));
+
+                            if (originalAnswer is null)
+                            {
+                                continue;
+                            }
+
+                            foreach (var correctiveReference in
+                                     correctiveAnswer.Evidence)
+                            {
+                                var existingReference =
+                                    originalAnswer.Evidence
+                                        .FirstOrDefault(
+                                            x =>
+                                                x.ResultIndex ==
+                                                    correctiveReference.ResultIndex);
+
+                                if (existingReference is null)
+                                {
+                                    originalAnswer.Evidence.Add(
+                                        correctiveReference);
+
+                                    continue;
+                                }
+
+                                foreach (var evidenceIndex in
+                                         correctiveReference.EvidenceIndexes)
+                                {
+                                    if (!existingReference.EvidenceIndexes.Contains(
+                                            evidenceIndex))
+                                    {
+                                        existingReference.EvidenceIndexes.Add(
+                                            evidenceIndex);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Console.WriteLine(
+                        "Combined evidence after corrective selection:");
+
+                    foreach (var answer in
+                             combinedEvidenceSelection.Answers)
+                    {
+                        Console.WriteLine(
+                            $"Information Need: {answer.InformationNeed}");
+
+                        foreach (var reference in answer.Evidence)
+                        {
+                            Console.WriteLine(
+                                $"Result Index: {reference.ResultIndex}");
+
+                            foreach (var evidenceIndex in
+                                     reference.EvidenceIndexes)
+                            {
+                                Console.WriteLine(
+                                    $"Evidence Index: {evidenceIndex}");
+
+                                var evidence =
+                                    evidenceUnits.FirstOrDefault(
+                                        e =>
+                                            e.ResultIndex ==
+                                                reference.ResultIndex &&
+                                            e.EvidenceIndex ==
+                                                evidenceIndex);
+
+                                Console.WriteLine(
+                                    $"Evidence Text: {evidence?.Text}");
+                            }
+                        }
+                    }
+
+                    Console.WriteLine(
+                        "================================================");
+
+                    // ==========================================
+                    // STEP 4C: CORRECTIVE COMPLETENESS VALIDATION
+                    // ==========================================
+
+                    Console.WriteLine(
+                        "========= CORRECTIVE COMPLETENESS VALIDATION =========");
+
+                    var correctiveCompletenessReasons = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+
+                    var correctiveEvidenceComplete = true;
+
+                    foreach (var informationNeed in informations)
+                    {
+                        var evidenceAnswer =
+                            combinedEvidenceSelection.Answers
+                                .FirstOrDefault(
+                                    x => string.Equals(
+                                        x.InformationNeed.Trim(),
+                                        informationNeed.Trim(),
+                                        StringComparison.OrdinalIgnoreCase));
+
+                        if (evidenceAnswer is null)
+                        {
+                            correctiveEvidenceComplete = false;
+
+                            Console.WriteLine(
+                                $"Information Need: {informationNeed}");
+
+                            Console.WriteLine(
+                                "Corrective Validated Complete: False");
+
+                            Console.WriteLine(
+                                "Reason: No evidence-selection answer found.");
+
+                            continue;
+                        }
+
+                        var selectedEvidenceUnits =
+                            new List<EvidenceUnit>();
+
+                        foreach (var reference in evidenceAnswer.Evidence)
+                        {
+                            foreach (var evidenceIndex in
+                                     reference.EvidenceIndexes)
+                            {
+                                var evidence =
+                                    evidenceUnits.FirstOrDefault(
+                                        e =>
+                                            e.ResultIndex ==
+                                                reference.ResultIndex &&
+                                            e.EvidenceIndex ==
+                                                evidenceIndex);
+
+                                if (evidence is not null &&
+                                    !string.IsNullOrWhiteSpace(evidence.Text))
+                                {
+                                    selectedEvidenceUnits.Add(evidence);
+                                }
+                            }
+                        }
+
+                        var completenessResult =
+                            await _evidenceCompletenessValidator.ValidateAsync(
+                                informationNeed,
+                                selectedEvidenceUnits);
+
+                        Console.WriteLine(
+                            $"Information Need: {informationNeed}");
+
+                        Console.WriteLine(
+                            $"Corrective Validated Complete: " +
+                            $"{completenessResult.Complete}");
+
+                        Console.WriteLine(
+                            $"Reason: {completenessResult.Reason}");
+
+                        correctiveCompletenessReasons[informationNeed] = completenessResult.Reason;
+
+                        if (!completenessResult.Complete)
+                        {
+                            correctiveEvidenceComplete = false;
+                        }
+                    }
+
+                    Console.WriteLine(
+                        $"Corrective Evidence Complete: " +
+                        $"{correctiveEvidenceComplete}");
+
+                    Console.WriteLine(
+                        "======================================================");
+
+
+                    if (!correctiveEvidenceComplete)
+                    {
+                        Console.WriteLine(
+                            "========= STARTING CORRECTIVE RETRIEVAL =========");
+
+                        foreach (var informationNeed in informations)
+                        {
+                            var completenessReason = correctiveCompletenessReasons.TryGetValue(informationNeed, out var reason) ? reason : string.Empty;
+
+                            Console.WriteLine($"Corrective Complexity: {complexityAnalysis?.Complexity}");
+
+                            Console.WriteLine(
+                                $"Corrective Complexity Score: {complexityAnalysis?.Score}");
+
+                            var correctiveRetrieval = await RetrieveCorrectiveEvidenceAsync(
+                                informationNeed,
+                                completenessReason,
+                                request,
+                                complexityAnalysis);
+
+                            var newCorrectiveResults =
+                            correctiveRetrieval.Results
+                                .Where(corrective =>
+                                    !searchResults.Any(
+                                        original =>
+                                            original.Record.Id ==
+                                            corrective.Record.Id))
+                                .ToList();
+
+                            Console.WriteLine(
+                                $"Corrective new results: {newCorrectiveResults.Count}");
+
+                            Console.WriteLine(
+                                $"Information Need: {informationNeed}");
+
+                            Console.WriteLine(
+                                $"Corrective Results: " +
+                                $"{correctiveRetrieval.Results.Count}");
+
+                            foreach (var result in correctiveRetrieval.Results)
+                            {
+                                Console.WriteLine(
+                                    $"Corrective Result: " +
+                                    $"{result.Record.Content}");
+                            }
+                        }
+
+                        Console.WriteLine(
+                            "==================================================");
+
+                        return CreateAgentResult(
+                            CreateResponse(
+                                "I couldn't find sufficient evidence to answer all parts of your question."),
+                            searchResults);
+                    }
+
+                }
+
+                var evidenceSelectionResult =
+                    combinedEvidenceSelection;
+
+                // ==========================================
+                // STEP 5: MAP EVIDENCE REFERENCES TO EXACT TEXT
+                // ==========================================
+
+                var selectedEvidence =
+                    new List<string>();
+
+                foreach (var answer in evidenceSelectionResult.Answers)
+                {
+                    foreach (var reference in answer.Evidence)
+                    {
+                        if (reference.ResultIndex < 0 ||
+                            reference.ResultIndex >= searchResults.Count)
+                        {
+                            continue;
+                        }
+
+                        foreach (var evidenceIndex in reference.EvidenceIndexes)
+                        {
+                            var evidence =
+                                evidenceUnits.FirstOrDefault(
+                                    e =>
+                                        e.ResultIndex ==
+                                            reference.ResultIndex &&
+                                        e.EvidenceIndex ==
+                                            evidenceIndex);
+
+                            if (evidence is not null &&
+                                !string.IsNullOrWhiteSpace(evidence.Text))
+                            {
+                                selectedEvidence.Add(
+                                    evidence.Text);
+                            }
+                        }
+                    }
+                }
+
+                selectedEvidence =
+                    selectedEvidence
+                        .Distinct(StringComparer.Ordinal)
+                        .ToList();
+
+                Console.WriteLine(
+                    $"Evidence answers: {evidenceSelectionResult.Answers.Count}");
+
+                foreach (var answer in evidenceSelectionResult.Answers)
+                {
+                    Console.WriteLine(
+                        $"Information Need: {answer.InformationNeed}");
+
+                    foreach (var reference in answer.Evidence)
+                    {
+                        Console.WriteLine(
+                            $"Result Index: {reference.ResultIndex}");
+
+                        foreach (var evidenceIndex in reference.EvidenceIndexes)
+                        {
+                            Console.WriteLine(
+                                $"Selected Evidence Index: {evidenceIndex}");
+                        }
+                    }
+                }
+
+                Console.WriteLine(
+                    "========= EVIDENCE SELECTION RESPONSE =========");
+
+                Console.WriteLine(
+                    "Combined evidence selection responses processed.");
+
+                Console.WriteLine(
+                    "================================================");
+
+                Console.WriteLine(
+                    "========= SELECTED EVIDENCE =========");
+
+                foreach (var evidence in selectedEvidence)
+                {
+                    Console.WriteLine(
+                        evidence);
+                }
+
+                Console.WriteLine(
+                    "=====================================");
+
+                // ==========================================
+                // STEP 6: CREATE FINAL ANSWER FROM SELECTED EVIDENCE
+                // ==========================================
+
+                var finalResponse =
+                    CreateResponse(
+                        string.Join(
+                            Environment.NewLine,
+                            selectedEvidence));
+
+                Console.WriteLine(
+                    "========= DETERMINISTIC FINAL ANSWER =========");
+
+                Console.WriteLine(
+                    finalResponse.Message.Content);
+
+                Console.WriteLine(
+                    "==============================================");
+
+                // ==========================================
+                // STEP 7: VALIDATE GROUNDING
+                // ==========================================
+
+                var groundingResult =
+                    await ValidateGroundingAsync(
+                        request,
+                        finalResponse,
+                        selectedEvidence);
+
+                if (!groundingResult.Grounded)
+                {
+                    finalResponse =
+                        CreateResponse(
+                            UngroundedAnswerMessage);
+                }
+
+                Console.WriteLine(
+                    "========= GROUNDING VALIDATION =========");
+
+                Console.WriteLine(
+                    $"Grounded = {groundingResult.Grounded}");
+
+                Console.WriteLine(
+                    $"Reason = {groundingResult.Reason}");
+
+                Console.WriteLine(
+                    "=========================================");
+
+                // ==========================================
+                // STEP 8: RETURN FINAL ANSWER
+                // ==========================================
+
+                return CreateAgentResult(
                     finalResponse,
                     searchResults);
-
-            if (!groundingResult.Grounded)
-            {
-                finalResponse =
-                    CreateResponse(
-                        UngroundedAnswerMessage);
             }
-
-            Console.WriteLine(
-                "======================================");
-
-            return CreateAgentResult(
-                finalResponse,
-                searchResults);
-        }
 
 
         // ============================================================
@@ -320,24 +953,36 @@ namespace AIChatAssistant.Services.Tools
                 return CreateResponse(
                     NoKnowledgeMessage);
             }
-
-            var bestRerankScore =
+            //Previous
+            //var bestRerankScore =
+            //    searchResults.Max(
+            //        x => x.RerankScore);
+            //new
+            var bestSimilarity =
                 searchResults.Max(
-                    x => x.RerankScore);
+                    x => x.Similarity);
 
             Console.WriteLine(
-                $"Best RerankScore: {bestRerankScore:F3}");
+                 $"Best Similarity: {bestSimilarity:F3}");
 
             Console.WriteLine(
-                $"RerankThreshold: {_ragOptions.RerankThreshold:F3}");
+                $"SimilarityThreshold: {_ragOptions.RerankThreshold:F3}");
+            //Old
+            //if (bestRerankScore <
+            //    _ragOptions.RerankThreshold)
+            //{
+            //    return CreateResponse(
+            //        InsufficientEvidenceMessage);
+            //}
 
-            if (bestRerankScore <
-                _ragOptions.RerankThreshold)
+            //New code
+
+            if (bestSimilarity <
+               _ragOptions.SimilarityThreshold)
             {
                 return CreateResponse(
                     InsufficientEvidenceMessage);
             }
-
             return null;
         }
 
@@ -345,11 +990,12 @@ namespace AIChatAssistant.Services.Tools
         // GROUNDING VALIDATION
         // ============================================================
 
-        private async Task<GroundingValidationResult>
-            ValidateGroundingAsync(
-                ChatRequest request,
-                OllamaChatResponse response,
-                IReadOnlyList<SearchResult> searchResults)
+
+    private async Task<GroundingValidationResult>
+    ValidateGroundingAsync(
+        ChatRequest request,
+        OllamaChatResponse response,
+        IReadOnlyList<string> selectedEvidence)
         {
             var latestUserMessage =
                 request.Messages.Last(m =>
@@ -357,13 +1003,14 @@ namespace AIChatAssistant.Services.Tools
                         m.Role,
                         "user",
                         StringComparison.OrdinalIgnoreCase));
+
             var groundingStart = Stopwatch.GetTimestamp();
 
             var groundingResult =
                 await _groundingValidator.ValidateAsync(
                     latestUserMessage.Content,
                     response.Message.Content,
-                    searchResults);
+                    selectedEvidence);
 
             var groundingElapsed =
                 Stopwatch.GetElapsedTime(groundingStart);
@@ -595,6 +1242,181 @@ namespace AIChatAssistant.Services.Tools
                 Response = response,
                 SearchResults = searchResults
             };
+        }
+        private static List<EvidenceUnit> BuildEvidenceUnits(
+    IReadOnlyList<SearchResult> searchResults)
+        {
+            var units = new List<EvidenceUnit>();
+
+            for (int resultIndex = 0;
+                 resultIndex < searchResults.Count;
+                 resultIndex++)
+            {
+                var content =
+                    searchResults[resultIndex].Record.Content;
+
+                if (string.IsNullOrWhiteSpace(content))
+                    continue;
+
+                var sentences =
+                    Regex.Split(
+                        content,
+                        @"(?<=[.!?])\s+")
+                    .Where(s => !string.IsNullOrWhiteSpace(s))
+                    .ToList();
+
+                for (int evidenceIndex = 0;
+                     evidenceIndex < sentences.Count;
+                     evidenceIndex++)
+                {
+                    units.Add(
+                        new EvidenceUnit
+                        {
+                            ResultIndex = resultIndex,
+                            EvidenceIndex = evidenceIndex,
+                            Text = sentences[evidenceIndex].Trim()
+                        });
+                }
+            }
+            // TEMPORARY DEBUG
+            Console.WriteLine("========= EVIDENCE UNITS =========");
+
+            foreach (var unit in units)
+            {
+                Console.WriteLine(
+                    $"ResultIndex={unit.ResultIndex}, " +
+                    $"EvidenceIndex={unit.EvidenceIndex}, " +
+                    $"Text={unit.Text}");
+            }
+
+            Console.WriteLine("==================================");
+
+            return units;
+        }
+        private static bool HasCompleteEvidenceCoverage(
+     EvidenceSelectionResult? selection,
+     IReadOnlyList<string> informationNeeds,
+     IReadOnlyList<EvidenceUnit> evidenceUnits)
+        {
+            if (selection?.Answers is null)
+                return false;
+
+            foreach (var informationNeed in informationNeeds)
+            {
+                var answer =
+                    selection.Answers.FirstOrDefault(
+                        a => string.Equals(
+                            a.InformationNeed.Trim(),
+                            informationNeed.Trim(),
+                            StringComparison.OrdinalIgnoreCase));
+
+                if (answer is null)
+                    return false;
+
+                if (answer.Evidence is null ||
+                    answer.Evidence.Count == 0)
+                {
+                    return false;
+                }
+
+                foreach (var reference in answer.Evidence)
+                {
+                    if (reference.ResultIndex < 0)
+                        return false;
+
+                    if (reference.EvidenceIndexes is null ||
+                        reference.EvidenceIndexes.Count == 0)
+                    {
+                        return false;
+                    }
+
+                    foreach (var evidenceIndex in reference.EvidenceIndexes)
+                    {
+                        var evidenceExists =
+                            evidenceUnits.Any(
+                                e =>
+                                    e.ResultIndex == reference.ResultIndex &&
+                                    e.EvidenceIndex == evidenceIndex &&
+                                    !string.IsNullOrWhiteSpace(e.Text));
+
+                        if (!evidenceExists)
+                            return false;
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        private async Task<RetrievalResult> RetrieveCorrectiveEvidenceAsync(
+    string informationNeed,
+    string completenessReason,
+    ChatRequest request,
+    QueryComplexityResult? complexityAnalysis)
+        {
+            if (string.IsNullOrWhiteSpace(informationNeed))
+            {
+                return new RetrievalResult
+                {
+                    Results = [],
+                    InformationNeeds = []
+                };
+            }
+
+            Console.WriteLine(
+                "========= CORRECTIVE RETRIEVAL =========");
+
+            Console.WriteLine(
+                $"Information Need: {informationNeed}");
+
+            Console.WriteLine(
+                $"Completeness Gap: {completenessReason}");
+
+            Console.WriteLine(
+                $"Incoming Complexity: " +
+                $"{complexityAnalysis?.Complexity}");
+
+            Console.WriteLine(
+                $"Incoming Complexity Score: " +
+                $"{complexityAnalysis?.Score}");
+
+            var correctiveQuery =
+                string.IsNullOrWhiteSpace(completenessReason)
+                    ? informationNeed
+                    : $"{informationNeed}. {completenessReason}";
+
+            Console.WriteLine(
+                $"Corrective Query: {correctiveQuery}");
+
+            if (complexityAnalysis == null)
+            {
+                Console.WriteLine(
+                    "WARNING: Complexity analysis is NULL " +
+                    "inside RetrieveCorrectiveEvidenceAsync.");
+
+                Console.WriteLine(
+                    "=========================================");
+
+                throw new InvalidOperationException(
+                    "Complexity analysis was lost before corrective retrieval.");
+            }
+
+            var result =
+                await _knowledgeRetriever.RetrieveAsync(
+                    correctiveQuery,
+                    informationNeed,
+                    request.Filter,
+                    [informationNeed],
+                    complexityAnalysis);
+
+            Console.WriteLine(
+                $"Corrective retrieved results: " +
+                $"{result.Results.Count}");
+
+            Console.WriteLine(
+                "=========================================");
+
+            return result;
         }
     }
 }

@@ -3,8 +3,10 @@ using AIChatAssistant.Interfaces;
 using AIChatAssistant.Models;
 using AIChatAssistant.Models.AI.Search;
 using AIChatAssistant.Models.AI.VectorStore;
+using AIChatAssistant.Models.RAG;
 using AIChatAssistant.Services.AI.RAGPipeline;
 using Microsoft.Extensions.Options;
+using System.Diagnostics;
 
 namespace AIChatAssistant.Services.AI.Knowledge
 {
@@ -41,17 +43,24 @@ namespace AIChatAssistant.Services.AI.Knowledge
             _mmrSelector = mmrSelector;
             _retrievalConfidenceCalculator = retrievalConfidenceCalculator;
         }
-        public async Task<IReadOnlyList<SearchResult>> RetrieveAsync(
-    string question, string originalQuestion,
-    SearchFilter? filter = null)
+        public async Task<RetrievalResult> RetrieveAsync(
+      string question,
+      string originalQuestion,
+      SearchFilter? filter = null,
+      IReadOnlyList<string>? informationNeeds = null,
+      QueryComplexityResult? complexityAnalysis = null)
         {
-
             if (string.IsNullOrWhiteSpace(question))
             {
-                return [];
+                return new RetrievalResult
+                {
+                    Results = [],
+                    InformationNeeds = []
+                };
             }
 
-            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            var stopwatch =
+                System.Diagnostics.Stopwatch.StartNew();
 
             var correctiveAttempts = 0;
 
@@ -62,48 +71,125 @@ namespace AIChatAssistant.Services.AI.Knowledge
             Console.WriteLine(
                 $"Adaptive Retrieval Search Query: " +
                 $"'{question}'");
-            var adaptiveStrategy = await _adaptiveRetrievalStrategy.GetStrategyAsync(originalQuestion);
+
+            if (complexityAnalysis == null)
+            {
+                throw new InvalidOperationException(
+                    "Query complexity analysis must be provided " +
+                    "before retrieval.");
+            }
+
+            var adaptiveStrategy =
+                await _adaptiveRetrievalStrategy
+                    .GetStrategyAsync(complexityAnalysis);
+
             // ==========================================
             // INITIAL RETRIEVAL
             // ==========================================
 
-            var topK = adaptiveStrategy.TopK;
-            var similarityThreshold = adaptiveStrategy.Threshold;
+            var topK =
+                adaptiveStrategy.TopK;
+
+            var similarityThreshold =
+                adaptiveStrategy.Threshold;
 
             var (
                 results,
-                validation) =
+                validation,
+                detectedInformationNeeds,
+                candidatesRejectedByRerank) =
                     await RetrieveAndValidateAsync(
                         question,
                         originalQuestion,
                         topK,
                         similarityThreshold,
                         filter,
-                         "Initial");
-
+                        "Initial",
+                        informationNeeds);
 
             // ==========================================
             // ACCEPT GOOD RETRIEVAL
             // ==========================================
 
-            if (validation.IsRelevant && validation.Confidence >=
-                _options.MinimumRetrievalConfidence &&
-                validation.RetrievalConfidence >=
+            if (validation.IsRelevant &&
+                validation.Confidence >=
                 _options.MinimumRetrievalConfidence)
             {
                 stopwatch.Stop();
 
                 LogRetrievalSummary(
-                topK,
-                similarityThreshold,
-                initialAccepted: true,
-                correctiveAttempts,
-                results,
-                validation,
-                stopwatch.ElapsedMilliseconds,
-                "Initial");
+                    topK,
+                    similarityThreshold,
+                    initialAccepted: true,
+                    correctiveAttempts,
+                    results,
+                    validation,
+                    stopwatch.ElapsedMilliseconds,
+                    "Initial");
 
-                return results;
+                return new RetrievalResult
+                {
+                    Results = results,
+                    InformationNeeds = informationNeeds
+                };
+            }
+
+            // ==========================================
+            // NO CONTEXT TO CORRECT
+            // ==========================================
+
+            if (string.Equals(
+                    validation.Reason?.Trim(),
+                    "No retrieved context was available.",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                Console.WriteLine(
+                    "Corrective retrieval skipped: " +
+                    "no retrieved context was available to improve.");
+
+                stopwatch.Stop();
+
+                LogRetrievalSummary(
+                    topK,
+                    similarityThreshold,
+                    initialAccepted: false,
+                    correctiveAttempts,
+                    results,
+                    validation,
+                    stopwatch.ElapsedMilliseconds,
+                    "Failed");
+
+                return new RetrievalResult
+                {
+                    Results = [],
+                    InformationNeeds = []
+                };
+            }
+
+            if (candidatesRejectedByRerank)
+            {
+                Console.WriteLine(
+                    "Corrective retrieval skipped: " +
+                    "retrieved candidates were rejected by " +
+                    "the configured rerank threshold.");
+
+                stopwatch.Stop();
+
+                LogRetrievalSummary(
+                    topK,
+                    similarityThreshold,
+                    initialAccepted: false,
+                    correctiveAttempts,
+                    results,
+                    validation,
+                    stopwatch.ElapsedMilliseconds,
+                    "Failed");
+
+                return new RetrievalResult
+                {
+                    Results = [],
+                    InformationNeeds = []
+                };
             }
             // ==========================================
             // CORRECTIVE RETRIEVAL
@@ -112,10 +198,12 @@ namespace AIChatAssistant.Services.AI.Knowledge
             var correctiveQuestion = question;
 
             for (var attempt = 1;
-                 attempt <= _options.MaxCorrectiveRetrievalAttempts;
+                 attempt <=
+                 _options.MaxCorrectiveRetrievalAttempts;
                  attempt++)
             {
                 correctiveAttempts++;
+
                 Console.WriteLine(
                     "========= CORRECTIVE RETRIEVAL =========");
 
@@ -139,25 +227,29 @@ namespace AIChatAssistant.Services.AI.Knowledge
                 // GENERATE CORRECTIVE QUERY
                 // ==========================================
 
-                correctiveQuestion = await _correctiveQueryGenerator.GenerateAsync(
-                                    correctiveQuestion,
-                                    validation.Reason);
+                correctiveQuestion =
+                    await _correctiveQueryGenerator.GenerateAsync(
+                        correctiveQuestion,
+                        validation.Reason);
 
                 correctiveQuestion =
                     correctiveQuestion
                         .Trim()
                         .Trim('`', '"', '\'');
 
-                if (string.IsNullOrWhiteSpace(correctiveQuestion))
+                if (string.IsNullOrWhiteSpace(
+                        correctiveQuestion))
                 {
                     Console.WriteLine(
-                        "Corrective query generation returned an empty query.");
+                        "Corrective query generation " +
+                        "returned an empty query.");
 
                     break;
                 }
 
                 Console.WriteLine(
-                    $"Corrective Query: {correctiveQuestion}");
+                    $"Corrective Query: " +
+                    $"{correctiveQuestion}");
 
                 Console.WriteLine(
                     "========================================");
@@ -168,7 +260,9 @@ namespace AIChatAssistant.Services.AI.Knowledge
 
                 (
                     results,
-                    validation) =
+                    validation,
+                    informationNeeds,
+                    candidatesRejectedByRerank) =
                         await RetrieveAndValidateAsync(
                             correctiveQuestion,
                             originalQuestion,
@@ -182,43 +276,50 @@ namespace AIChatAssistant.Services.AI.Knowledge
                 // ==========================================
 
                 if (validation.IsRelevant &&
-                validation.Confidence >=
-                _options.MinimumRetrievalConfidence &&
-                validation.RetrievalConfidence >=
-                _options.MinimumRetrievalConfidence)
+                    validation.Confidence >=
+                    _options.MinimumRetrievalConfidence)
                 {
                     stopwatch.Stop();
 
                     LogRetrievalSummary(
-                    topK,
-                    similarityThreshold,
-                    initialAccepted: false,
-                    correctiveAttempts,
-                    results,
-                    validation,
-                    stopwatch.ElapsedMilliseconds,
-                    "Corrective");
+                        topK,
+                        similarityThreshold,
+                        initialAccepted: false,
+                        correctiveAttempts,
+                        results,
+                        validation,
+                        stopwatch.ElapsedMilliseconds,
+                        "Corrective");
 
-                    return results;
+                    return new RetrievalResult
+                    {
+                        Results = results,
+                        InformationNeeds = informationNeeds
+                    };
                 }
             }
 
             // ==========================================
             // RETRIEVAL FAILED
             // ==========================================
+
             stopwatch.Stop();
 
             LogRetrievalSummary(
-            topK,
-            similarityThreshold,
-            initialAccepted: false,
-            correctiveAttempts,
-            results,
-            validation,
-            stopwatch.ElapsedMilliseconds,
-            "Failed");
+                topK,
+                similarityThreshold,
+                initialAccepted: false,
+                correctiveAttempts,
+                results,
+                validation,
+                stopwatch.ElapsedMilliseconds,
+                "Failed");
 
-            return [];
+            return new RetrievalResult
+            {
+                Results = [],
+                InformationNeeds = []
+            };
         }
         private async Task<IReadOnlyList<SearchResult>> ExpandContextAsync(
     IReadOnlyList<SearchResult> results)
@@ -293,7 +394,9 @@ namespace AIChatAssistant.Services.AI.Knowledge
                     Content = contextContent,
                     Vector = record.Vector,
                     FileName = record.FileName,
-                    CreatedOn = record.CreatedOn
+                    CreatedOn = record.CreatedOn,
+                     ContentType = record.ContentType,
+                    UploadedAt = record.UploadedAt
                 };
 
                 expandedResults.Add(
@@ -303,7 +406,10 @@ namespace AIChatAssistant.Services.AI.Knowledge
                         Similarity = result.Similarity,
                         RrfScore = result.RrfScore,
                         RerankScore = result.RerankScore,
-                        Rank = result.Rank
+                        Rank = result.Rank,
+                        QueryType = result.QueryType,
+                        QueryWeight = result.QueryWeight,
+                        SearchQuery = result.SearchQuery
                     });
             }
             Console.WriteLine("========= CONTEXT EXPANSION =========");
@@ -321,88 +427,146 @@ namespace AIChatAssistant.Services.AI.Knowledge
 
             return expandedResults;
         }
-        private async Task<(IReadOnlyList<SearchResult> Results,RetrievalValidationResult Validation)> RetrieveAndValidateAsync(
-      string searchQuery,
-      string OriginalQuestion,
-      int topK,
-      float similarityThreshold,
-      SearchFilter? filter = null,
-      string retrievalType = "Initial")
+        private async Task<(
+        IReadOnlyList<SearchResult> Results,
+        RetrievalValidationResult Validation,
+        IReadOnlyList<string> InformationNeeds,
+        bool CandidatesRejectedByRerank)>
+        RetrieveAndValidateAsync(
+        string searchQuery,
+        string OriginalQuestion,
+        int topK,
+        float similarityThreshold,
+        SearchFilter? filter = null,
+        string retrievalType = "Initial",
+        IReadOnlyList<string>? suppliedInformationNeeds = null)
         {
             // ==========================================
-            // STEP 1: Query decomposition
-            // ==========================================
-
-            //var decomposedQueries =
-            //    await _queryDecomposer.DecomposeAsync(
-            //        OriginalQuestion);
-
-            var decomposedQueries =
-                await _queryDecomposer.DecomposeIfNeededAsync(
-                    OriginalQuestion);
-
-            Console.WriteLine(
-                "========= QUERY DECOMPOSITION =========");
-
-            Console.WriteLine(
-                $"Original Question: {OriginalQuestion}");
-
-            foreach (var query in decomposedQueries)
-            {
-                Console.WriteLine(
-                    $"Sub-question: {query}");
-            }
-
-            Console.WriteLine(
-                "=======================================");
-
-            // ==========================================
-            // STEP 2: Multi-query generation
+            // STEP 1 + STEP 2: Build search queries
             // ==========================================
 
             var searchQueries =
                 new List<string>();
-            if (decomposedQueries.Count == 1)
+
+            IReadOnlyList<string> informationNeeds;
+
+            if (string.Equals(
+                    retrievalType,
+                    "Corrective",
+                    StringComparison.OrdinalIgnoreCase))
             {
-                searchQueries.Add(decomposedQueries[0]);
+                // ==========================================
+                // CORRECTIVE RETRIEVAL
+                // ==========================================
+
+                // Corrective retrieval uses only the
+                // corrected search query.
+                searchQueries.Add(
+                    searchQuery);
+
+                informationNeeds =
+                    [searchQuery];
 
                 Console.WriteLine(
-                    "Multi-query generation skipped: only one decomposed query.");
+                    "========= CORRECTIVE QUERY RETRIEVAL =========");
+
+                Console.WriteLine(
+                    $"Corrective Search Query: {searchQuery}");
+
+                Console.WriteLine(
+                    "Decomposition skipped.");
+
+                Console.WriteLine(
+                    "Multi-query generation skipped.");
+
+                Console.WriteLine(
+                    "==============================================");
             }
             else
             {
+                // ==========================================
+                // INITIAL RETRIEVAL
+                // ==========================================
 
-                foreach (var decomposedQuery in decomposedQueries)
+                var decomposedQueries =
+                    suppliedInformationNeeds?.Count > 0
+                        ? suppliedInformationNeeds
+                        : [searchQuery];
+
+                informationNeeds =
+                    decomposedQueries;
+
+                Console.WriteLine(
+                    "========= QUERY DECOMPOSITION =========");
+
+                Console.WriteLine(
+                    $"Original Question: {OriginalQuestion}");
+
+                foreach (var query in decomposedQueries)
                 {
-                    var generatedQueries =
-                        await _multiQueryGenerator.GenerateAsync(
-                            decomposedQuery);
-
-                    searchQueries.AddRange(
-                        generatedQueries);
+                    Console.WriteLine(
+                        $"Sub-question: {query}");
                 }
+
+                Console.WriteLine(
+                    "Decomposition already performed by caller.");
+
+                Console.WriteLine(
+                    "=======================================");
+
+
+                // ==========================================
+                // Multi-query generation
+                // ==========================================
+
+                if (decomposedQueries.Count == 1)
+                {
+                    searchQueries.Add(
+                        decomposedQueries[0]);
+
+                    Console.WriteLine(
+                        "Multi-query generation skipped: " +
+                        "only one decomposed query.");
+                }
+                else
+                {
+                    foreach (var decomposedQuery in decomposedQueries)
+                    {
+                        var generatedQueries =
+                            await _multiQueryGenerator.GenerateAsync(
+                                decomposedQuery);
+
+                        searchQueries.AddRange(
+                            generatedQueries);
+                    }
+                }
+
+                // Always preserve the actual initial
+                // search query.
+                searchQueries.Add(
+                    searchQuery);
             }
 
-            // Always preserve the actual search query.
-            // This is important for corrective retrieval.
-            searchQueries.Add(searchQuery);
 
-            searchQueries = searchQueries
-            .Where(q =>
-            !string.IsNullOrWhiteSpace(q))
-            .Select(q => q.Trim())
-            .Distinct(
-                StringComparer.OrdinalIgnoreCase)
-            .Take(9)
-            .ToList();
+            // ==========================================
+            // Normalize search queries
+            // ==========================================
 
-            if (!string.IsNullOrWhiteSpace(searchQuery) &&
-                !searchQueries.Contains(
-                    searchQuery,
-                    StringComparer.OrdinalIgnoreCase))
-            {
-                searchQueries.Add(searchQuery.Trim());
-            }
+            searchQueries =
+                searchQueries
+                    .Where(q =>
+                        !string.IsNullOrWhiteSpace(q))
+                    .Select(q =>
+                        q.Trim())
+                    .Distinct(
+                        StringComparer.OrdinalIgnoreCase)
+                    .Take(9)
+                    .ToList();
+
+
+            // ==========================================
+            // STEP 3: Retrieve candidates
+            // ==========================================
 
             Console.WriteLine(
                 "========= MULTI QUERY RETRIEVAL =========");
@@ -422,50 +586,57 @@ namespace AIChatAssistant.Services.AI.Knowledge
             Console.WriteLine(
                 "==========================================");
 
-            // ==========================================
-            // STEP 3: Retrieve candidates
-            // ==========================================
 
             var allCandidates =
                 new List<SearchResult>();
 
-            foreach (var query in searchQueries)
+            var retrievalStart =
+                Stopwatch.GetTimestamp();
+
+            allCandidates =
+                await _hybridRetriever.RetrieveCandidatesAsync(
+                    searchQueries,
+                    filter,
+                    topK * 2,
+                    similarityThreshold,
+                    retrievalType);
+
+            var retrievalElapsed =
+                Stopwatch.GetElapsedTime(
+                    retrievalStart);
+
+            Console.WriteLine(
+                $"Batch hybrid retrieval time: " +
+                $"{retrievalElapsed.TotalMilliseconds:F0} ms");
+
+
+            foreach (var candidate in allCandidates)
             {
-                var queryType =
+                var candidateQueryType =
                     string.Equals(
-                        query,
+                        candidate.SearchQuery,
                         searchQuery,
                         StringComparison.OrdinalIgnoreCase)
                         ? retrievalType
                         : "Generated";
 
-                var queryWeight = queryType switch
-                {
-                   "Initial" => 1.0f,
-                   "Corrective" => 1.0f,
-                   "Generated" => 0.8f,
-                   _ => 0.8f
-                };
+                candidate.QueryType =
+                    candidateQueryType;
 
-                var candidates =
-                    await _hybridRetriever.RetrieveCandidatesAsync(
-                        query,
-                        filter,
-                        topK * 2,
-                        similarityThreshold,
-                        queryType);
-                foreach (var candidate in candidates)
-                {
-                    candidate.QueryWeight = queryWeight;
-                }
-
-                allCandidates.AddRange(
-                    candidates);
+                candidate.QueryWeight =
+                    candidateQueryType switch
+                    {
+                        "Initial" => 1.0f,
+                        "Corrective" => 1.0f,
+                        "Generated" => 0.8f,
+                        _ => 0.8f
+                    };
             }
 
             Console.WriteLine(
                 $"Total candidates before merge: " +
                 $"{allCandidates.Count}");
+
 
             // ==========================================
             // STEP 4: Remove duplicate chunks
@@ -476,13 +647,15 @@ namespace AIChatAssistant.Services.AI.Knowledge
                     .GroupBy(x => x.Record.Id)
                     .Select(group =>
                         group
-                            .OrderByDescending(x => x.RrfScore)
+                            .OrderByDescending(
+                                x => x.RrfScore)
                             .First())
                     .ToList();
 
             Console.WriteLine(
                 $"Unique candidates after merge: " +
                 $"{uniqueCandidates.Count}");
+
 
             // ==========================================
             // STEP 5: Reranking
@@ -503,14 +676,18 @@ namespace AIChatAssistant.Services.AI.Knowledge
             // STEP 6: MMR
             // ==========================================
 
-            var finalResults = rerankedResults;
+            var finalResults =
+                rerankedResults;
 
             if (_options.EnableMmr)
             {
                 var mmrCandidates =
                     rerankedResults
                         .Where(x =>
-                            x.RerankScore >= _options.RerankThreshold)
+                            x.Record.Vector is not null &&
+                            x.Record.Vector.Length > 0 &&
+                            x.RerankScore >=
+                            _options.RerankThreshold)
                         .ToList();
 
                 Console.WriteLine(
@@ -558,23 +735,41 @@ namespace AIChatAssistant.Services.AI.Knowledge
                     "=================================");
             }
 
+
+            // ==========================================
+            // NEW: Detect candidates rejected by rerank
+            // ==========================================
+
+            var candidatesRejectedByRerank =
+                rerankedResults.Count > 0 &&
+                finalResults.Count == 0;
+
+            Console.WriteLine(
+                $"Candidates rejected by rerank: " +
+                $"{candidatesRejectedByRerank}");
+
+
+            // ==========================================
+            // Before context expansion
+            // ==========================================
+
             Console.WriteLine(
                 "========= BEFORE CONTEXT EXPANSION =========");
 
-            foreach (var result in rerankedResults)
+            foreach (var result in finalResults)
             {
                 Console.WriteLine(
-                $"Rank={result.Rank}, " +
-                $"QueryType={result.QueryType}, " +
-                $"QueryWeight={result.QueryWeight:F2}, " +
-                $"SearchQuery={result.SearchQuery}, " +
-                $"RecordId={result.Record.Id}, " +
-                $"ChunkId={result.Record.ChunkId}, " +
-                $"DocumentId={result.Record.DocumentId}, " +
-                $"ChunkIndex={result.Record.ChunkIndex}, " +
-                $"Similarity={result.Similarity:F3}, " +
-                $"RrfScore={result.RrfScore:F4}, " +
-                $"RerankScore={result.RerankScore:F3}");
+                    $"Rank={result.Rank}, " +
+                    $"QueryType={result.QueryType}, " +
+                    $"QueryWeight={result.QueryWeight:F2}, " +
+                    $"SearchQuery={result.SearchQuery}, " +
+                    $"RecordId={result.Record.Id}, " +
+                    $"ChunkId={result.Record.ChunkId}, " +
+                    $"DocumentId={result.Record.DocumentId}, " +
+                    $"ChunkIndex={result.Record.ChunkIndex}, " +
+                    $"Similarity={result.Similarity:F3}, " +
+                    $"RrfScore={result.RrfScore:F4}, " +
+                    $"RerankScore={result.RerankScore:F3}");
 
                 Console.WriteLine(
                     result.Record.Content);
@@ -586,50 +781,76 @@ namespace AIChatAssistant.Services.AI.Knowledge
             Console.WriteLine(
                 "============================================");
 
+
             // ==========================================
-            // STEP 6: Context expansion
+            // STEP 7: Context expansion
             // ==========================================
 
-            var contextExpandedResults = await ExpandContextAsync(finalResults);
+            var contextExpandedResults =
+                await ExpandContextAsync(
+                    finalResults);
 
             Console.WriteLine(
                 $"Context-expanded results: " +
                 $"{contextExpandedResults.Count}");
 
+
             // ==========================================
-            // STEP 7: Contextual compression
+            // STEP 8: Contextual compression
             // ==========================================
 
             var compressedResults =
                 await _contextualCompressor.CompressAsync(
                     OriginalQuestion,
+                    finalResults,
                     contextExpandedResults);
 
             Console.WriteLine(
                 $"Context-compressed results: " +
                 $"{compressedResults.Count}");
 
+
             // ==========================================
-            // STEP 8: Retrieval validation
+            // STEP 9: Retrieval validation
             // ==========================================
 
             RetrievalValidationResult validation;
 
             if (compressedResults.Count > 0 &&
                 compressedResults.All(x =>
-                    x.RerankScore >= _options.RerankThreshold))
+                    x.RerankScore >=
+                    _options.RerankThreshold))
             {
-                validation = new RetrievalValidationResult
-                {
-                    IsRelevant = true,
-                    Confidence = 1.0f,
-                    Reason =
-                        "Retrieval passed the configured rerank threshold."
-                };
+                validation =
+                    new RetrievalValidationResult
+                    {
+                        IsRelevant = true,
+                        Confidence = 1.0f,
+                        Reason =
+                            "Retrieval passed the configured rerank threshold."
+                    };
 
                 Console.WriteLine(
                     "Retrieval validation skipped: " +
                     "all results passed the rerank threshold.");
+            }
+            else if (rerankedResults.Count > 0 &&
+                     finalResults.Count == 0)
+            {
+                validation =
+                    new RetrievalValidationResult
+                    {
+                        IsRelevant = false,
+                        Confidence = 0.0f,
+                        Reason =
+                            "Retrieved candidates were rejected by " +
+                            "the configured rerank threshold."
+                    };
+
+                Console.WriteLine(
+                    "Retrieval validation: " +
+                    "candidates were retrieved but rejected " +
+                    "by the rerank threshold.");
             }
             else
             {
@@ -654,14 +875,18 @@ namespace AIChatAssistant.Services.AI.Knowledge
             Console.WriteLine(
                 "========================================");
 
+
             // ==========================================
-            // STEP 8: confidence Calculator
+            // STEP 10: Confidence Calculator
             // ==========================================
 
+            var retrievalConfidence =
+                _retrievalConfidenceCalculator.Calculate(
+                    compressedResults,
+                    validation);
 
-            var retrievalConfidence = _retrievalConfidenceCalculator.Calculate(compressedResults, validation);
-
-            validation.RetrievalConfidence = retrievalConfidence;
+            validation.RetrievalConfidence =
+                retrievalConfidence;
 
             Console.WriteLine(
                 "========= RETRIEVAL CONFIDENCE =========");
@@ -677,9 +902,16 @@ namespace AIChatAssistant.Services.AI.Knowledge
             Console.WriteLine(
                 "========================================");
 
+
+            // ==========================================
+            // RETURN
+            // ==========================================
+
             return (
                 compressedResults,
-                validation);
+                validation,
+                informationNeeds,
+                candidatesRejectedByRerank);
         }
 
         private void LogRetrievalSummary(

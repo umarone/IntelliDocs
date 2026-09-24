@@ -1,5 +1,6 @@
 ﻿using AIChatAssistant.Interfaces;
 using AIChatAssistant.Models;
+using AIChatAssistant.Models.RAG;
 using AIChatAssistant.Models.Tools;
 
 namespace AIChatAssistant.Services.Tools
@@ -83,10 +84,13 @@ namespace AIChatAssistant.Services.Tools
             {
                 filter = searchFilter;
             }
-            var results =
+            var retrievalResult =
                 await _knowledgeRetriever.RetrieveAsync(query, request.OriginalQuestion , filter);
-
-            if (results.Count == 0)
+            
+            var searchResults = retrievalResult.Results;
+            var informationNeeds = retrievalResult.InformationNeeds;
+            
+            if (searchResults.Count == 0)
             {
                 return new ToolResult
                 {
@@ -98,7 +102,7 @@ namespace AIChatAssistant.Services.Tools
 
             var lines = new List<string>();
 
-            foreach (var result in results)
+            foreach (var result in searchResults)
             {
                 lines.Add(
                     $"Similarity: {result.Similarity:F2}");
@@ -118,7 +122,7 @@ namespace AIChatAssistant.Services.Tools
                     lines),
                 Metadata = new Dictionary<string, object>
                 {
-                    ["SearchResults"] = results
+                    ["SearchResults"] = searchResults
                 }
             };
         }

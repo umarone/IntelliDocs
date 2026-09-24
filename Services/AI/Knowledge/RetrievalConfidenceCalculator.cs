@@ -5,30 +5,33 @@ namespace AIChatAssistant.Services.AI.Knowledge
     public class RetrievalConfidenceCalculator
     {
         public float Calculate(
-    IReadOnlyList<SearchResult> results,
-    RetrievalValidationResult validation)
+            IReadOnlyList<SearchResult> results,
+            RetrievalValidationResult validation)
         {
             if (results.Count == 0)
             {
                 return 0f;
             }
 
-            var bestRerankScore =
-                results.Max(x => x.RerankScore);
+            var bestSimilarity =
+                results.Max(x => x.Similarity);
 
-            var averageRerankScore =
-                results.Average(x => x.RerankScore);
+            var averageSimilarity =
+                results.Average(x => x.Similarity);
 
             var validatorConfidence =
                 validation.Confidence;
 
-            // Weighted confidence:
-            // 50% retrieval/reranking quality
-            // 50% LLM retrieval validation
+            // Weighted retrieval quality:
+            // 60% best semantic similarity
+            // 40% average semantic similarity
             var retrievalScore =
-                (bestRerankScore * 0.6f) +
-                (averageRerankScore * 0.4f);
+                (bestSimilarity * 0.6f) +
+                (averageSimilarity * 0.4f);
 
+            // Final confidence:
+            // 50% retrieval quality
+            // 50% LLM validation
             var confidence =
                 (retrievalScore * 0.5f) +
                 (validatorConfidence * 0.5f);
